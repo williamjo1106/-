@@ -1,0 +1,5 @@
+{
+  "name": "AI 과제 제안서 자동 평가 시스템 (Lead Reviewer)",
+  "description": "업로드된 과제 제안서(PPTX, PDF)를 분석하여 설정된 필수 조건에 따라 합격/불합격을 판정하고 구체적인 근거를 제공하는 전문 평가 시스템입니다.",
+  "requestFramePermissions": []
+}
