@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   FileUp, 
   CheckCircle2, 
@@ -8,6 +8,7 @@ import {
   Trash2, 
   History, 
   ChevronRight, 
+  ChevronLeft, 
   Settings, 
   FileText,
   Loader2,
@@ -15,12 +16,16 @@ import {
   BookOpen,
   LayoutDashboard,
   Save,
-  UploadCloud
+  UploadCloud,
+  Pencil,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import Markdown from 'react-markdown';
+import * as XLSX from 'xlsx';
+import { Toaster, toast } from 'sonner';
 
 import { Criterion, EvaluationResult, Decision, ReferenceExample, AIConfig } from './types';
 import { DEFAULT_CRITERIA } from './constants';
@@ -54,15 +59,34 @@ export default function App() {
   const [aiConfig, setAiConfig] = useState<AIConfig>(() => {
     const saved = localStorage.getItem('reviewer-ai-config');
     return saved ? JSON.parse(saved) : {
-      baseUrl: 'https://api.openai.com/v1',
+      baseUrl: '',
       apiKey: '',
-      modelId: 'gpt-4o'
+      modelId: 'gemini-3-flash-preview'
     };
   });
   const [selectedEval, setSelectedEval] = useState<EvaluationResult | null>(null);
   const [newCriterionText, setNewCriterionText] = useState('');
   const [isMandatory, setIsMandatory] = useState(true);
   const [dragActive, setDragActive] = useState(false);
+  const [librarySearchQuery, setLibrarySearchQuery] = useState('');
+  const [librarySearchResults, setLibrarySearchResults] = useState<ReferenceExample[]>([]);
+
+  // Custom Confirm Modal State
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setConfirmModal({ isOpen: true, title, message, onConfirm });
+  };
 
   // Chat state
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
@@ -83,21 +107,8 @@ export default function App() {
     setIsChatLoading(true);
 
     try {
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: [...chatMessages, userMessage],
-          config: aiConfig
-        })
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'AI 응답 중 오류가 발생했습니다.');
-      }
-
-      const assistantMessage = await response.json();
+      const { chatWithAI } = await import('./services/geminiService');
+      const assistantMessage = await chatWithAI([...chatMessages, userMessage], aiConfig, evaluations, examples);
       setChatMessages(prev => [...prev, assistantMessage]);
     } catch (error) {
       console.error('Chat error:', error);
@@ -134,6 +145,25 @@ export default function App() {
     localStorage.setItem('reviewer-ai-config', JSON.stringify(aiConfig));
   }, [aiConfig]);
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 3;
+
+  const [editingExampleId, setEditingExampleId] = useState<string | null>(null);
+  const [editingReasoning, setEditingReasoning] = useState<string>('');
+
+  const handleStartEdit = (ex: ReferenceExample) => {
+    setEditingExampleId(ex.id);
+    setEditingReasoning(ex.reasoning);
+  };
+
+  const handleSaveEdit = (id: string) => {
+    setExamples(prev => prev.map(ex => 
+      ex.id === id ? { ...ex, reasoning: editingReasoning } : ex
+    ));
+    setEditingExampleId(null);
+    toast.success('Reasoning updated.');
+  };
+
   const handleAddCriterion = () => {
     if (!newCriterionText.trim()) return;
     const newCriterion: Criterion = {
@@ -146,7 +176,7 @@ export default function App() {
   };
 
   const handleRemoveCriterion = (id: string) => {
-    setCriteria(criteria.filter(c => c.id !== id));
+    setCriteria(prev => prev.filter(c => c.id !== id));
   };
 
   const [selectedExampleIds, setSelectedExampleIds] = useState<string[]>([]);
@@ -155,7 +185,7 @@ export default function App() {
 
   const handleAddExample = async () => {
     if (!newExample.type || !newExample.reasoning) {
-      alert('판정 유형과 근거를 입력해 주세요.');
+      toast.error('판정 유형과 근거를 입력해 주세요.');
       return;
     }
 
@@ -165,18 +195,15 @@ export default function App() {
       let content = newExample.content || '';
 
       if (manualFile) {
-        const base64Data = await fileToBase64(manualFile);
         const response = await ingestReferenceFile(
-          base64Data.split(',')[1],
-          manualFile.name,
-          manualFile.type,
+          manualFile,
           newExample.type as 'PASS' | 'FAIL',
           aiConfig
         );
         title = response.title;
         content = response.content;
       } else if (!title || !content) {
-        alert('파일을 업로드하거나 제목과 내용을 직접 입력해 주세요.');
+        toast.error('파일을 업로드하거나 제목과 내용을 직접 입력해 주세요.');
         setIsIngesting(false);
         return;
       }
@@ -191,10 +218,11 @@ export default function App() {
       setExamples(prev => [example, ...prev]);
       setNewExample({ type: 'PASS', title: '', content: '', reasoning: '' });
       setManualFile(null);
-      alert('라이브러리에 저장되었습니다.');
+      setCurrentPage(1);
+      toast.success('라이브러리에 저장되었습니다.');
     } catch (error) {
       console.error('Error adding manual case:', error);
-      alert('사례 등록 중 오류가 발생했습니다.');
+      toast.error('사례 등록 중 오류가 발생했습니다.');
     } finally {
       setIsIngesting(false);
     }
@@ -202,10 +230,15 @@ export default function App() {
 
   const handleDeleteSelected = () => {
     if (selectedExampleIds.length === 0) return;
-    if (confirm(`${selectedExampleIds.length}개의 사례를 삭제하시겠습니까?`)) {
-      setExamples(prev => prev.filter(ex => !selectedExampleIds.includes(ex.id)));
-      setSelectedExampleIds([]);
-    }
+    showConfirm(
+      '사례 삭제',
+      `${selectedExampleIds.length}개의 사례를 삭제하시겠습니까?`,
+      () => {
+        setExamples(prev => prev.filter(ex => !selectedExampleIds.includes(ex.id)));
+        setSelectedExampleIds([]);
+        toast.success('선택한 사례가 삭제되었습니다.');
+      }
+    );
   };
 
   const toggleExampleSelection = (id: string) => {
@@ -218,17 +251,15 @@ export default function App() {
 
   const handleBulkIngest = async (files: FileList | null, type: 'PASS' | 'FAIL') => {
     if (!files || files.length === 0) return;
-    
+
     setIsIngesting(true);
     const newExamples: ReferenceExample[] = [];
+    let failCount = 0;
 
     for (const file of Array.from(files)) {
       try {
-        const base64Data = await fileToBase64(file);
         const response = await ingestReferenceFile(
-          base64Data.split(',')[1],
-          file.name,
-          file.type,
+          file,
           type,
           aiConfig
         );
@@ -243,12 +274,19 @@ export default function App() {
         newExamples.push(example);
       } catch (error) {
         console.error(`Error ingesting ${file.name}:`, error);
+        failCount++;
       }
     }
 
     setExamples(prev => [...newExamples, ...prev]);
     setIsIngesting(false);
-    alert(`${newExamples.length}개의 사례가 라이브러리에 추가되었습니다.`);
+    setCurrentPage(1);
+    
+    if (newExamples.length > 0) {
+      toast.success(`${newExamples.length}개의 사례가 라이브러리에 추가되었습니다.${failCount > 0 ? ` (${failCount}개 실패)` : ''}`);
+    } else if (failCount > 0) {
+      toast.error(`모든 사례(${failCount}개) 분석에 실패했습니다. 파일 형식이나 API 설정을 확인해 주세요.`);
+    }
   };
 
   const handleSaveToLibrary = (evalResult: EvaluationResult) => {
@@ -257,15 +295,26 @@ export default function App() {
       id: crypto.randomUUID(),
       type: decision as 'PASS' | 'FAIL',
       title: evalResult.fileName,
-      content: evalResult.reasoning.substring(0, 300) + '...',
-      reasoning: evalResult.reasoning,
+      teamName: evalResult.teamName,
+      proposerName: evalResult.proposerName,
+      content: evalResult.tableSummary.substring(0, 300) + '...',
+      reasoning: evalResult.userReasoning || '',
     };
     setExamples(prev => [example, ...prev]);
-    alert('라이브러리에 저장되었습니다. 이제 이 사례는 다음 평가의 참조 데이터로 사용됩니다.');
+    
+    // Remove from history after saving
+    setEvaluations(prev => prev.filter(ev => ev.id !== evalResult.id));
+    if (selectedEval?.id === evalResult.id) {
+      setSelectedEval(null);
+    }
+
+    setCurrentPage(1);
+    toast.success('라이브러리에 저장되고 목록에서 제거되었습니다.');
   };
 
   const handleRemoveExample = (id: string) => {
-    setExamples(examples.filter(e => e.id !== id));
+    setExamples(prev => prev.filter(e => e.id !== id));
+    setSelectedExampleIds(prev => prev.filter(i => i !== id));
   };
 
   const handleFileUpload = async (files: FileList | null) => {
@@ -276,11 +325,8 @@ export default function App() {
 
     for (const file of Array.from(files)) {
       try {
-        const base64Data = await fileToBase64(file);
         const response = await evaluateProposal(
-          base64Data.split(',')[1],
-          file.name,
-          file.type,
+          file,
           criteria,
           examples,
           aiConfig
@@ -293,13 +339,15 @@ export default function App() {
           reasoning: response.reasoning,
           missingCriteria: response.missing_criteria,
           tableSummary: response.table_summary,
+          proposerName: response.proposer_name,
+          teamName: response.team_name,
           timestamp: Date.now(),
           mimeType: file.type,
         };
         newEvaluations.push(result);
       } catch (error) {
         console.error(`Error evaluating ${file.name}:`, error);
-        alert(`${file.name} 평가 중 오류가 발생했습니다.`);
+        toast.error(`${file.name} 평가 중 오류가 발생했습니다.`);
       }
     }
 
@@ -319,31 +367,134 @@ export default function App() {
     });
   };
 
-  const handleOverride = (id: string, decision: Decision) => {
+  const handleUserReasoningChange = (id: string, text: string) => {
     setEvaluations(prev => prev.map(ev => 
-      ev.id === id ? { ...ev, userDecision: decision } : ev
+      ev.id === id ? { ...ev, userReasoning: text } : ev
     ));
-    
-    // Auto-save to library when user makes a decision
-    const targetEval = evaluations.find(ev => ev.id === id);
-    if (targetEval) {
-      const example: ReferenceExample = {
-        id: crypto.randomUUID(),
-        type: decision as 'PASS' | 'FAIL',
-        title: targetEval.fileName,
-        content: targetEval.reasoning.substring(0, 300) + '...',
-        reasoning: targetEval.reasoning,
-      };
-      
-      // Check for duplicates (by title/filename)
-      setExamples(prev => {
-        if (prev.some(ex => ex.title === example.title)) return prev;
-        return [example, ...prev];
-      });
+    if (selectedEval?.id === id) {
+      setSelectedEval(prev => prev ? { ...prev, userReasoning: text } : null);
     }
+  };
+
+  const handleOverride = (id: string, decision: Decision) => {
+    const targetEval = evaluations.find(ev => ev.id === id);
+    if (!targetEval) return;
+
+    // Save to library
+    const example: ReferenceExample = {
+      id: crypto.randomUUID(),
+      type: decision as 'PASS' | 'FAIL',
+      title: targetEval.fileName,
+      teamName: targetEval.teamName,
+      proposerName: targetEval.proposerName,
+      content: targetEval.tableSummary.substring(0, 300) + '...',
+      reasoning: targetEval.userReasoning || '',
+    };
+    
+    setExamples(prev => {
+      if (prev.some(ex => ex.title === example.title)) return prev;
+      return [example, ...prev];
+    });
+
+    // Remove from history
+    setEvaluations(prev => prev.filter(ev => ev.id !== id));
 
     if (selectedEval?.id === id) {
-      setSelectedEval(prev => prev ? { ...prev, userDecision: decision } : null);
+      setSelectedEval(null);
+    }
+    
+    toast.success(`${targetEval.fileName}가 라이브러리에 저장되고 목록에서 제거되었습니다.`);
+  };
+
+  const handleDownloadExcel = () => {
+    if (evaluations.length === 0) return;
+
+    const data = evaluations.map(ev => ({
+      '파일명': ev.fileName,
+      '제안자': ev.proposerName || '미인식',
+      'AI 판정': ev.aiDecision,
+      '최종 판정': ev.userDecision || ev.aiDecision,
+      '평가 일시': new Date(ev.timestamp).toLocaleString(),
+      '평가 근거': ev.reasoning.substring(0, 1000) // 엑셀 셀 제한 고려
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Evaluation Results");
+    
+    // Generate buffer and download
+    XLSX.writeFile(workbook, `evaluation_results_${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
+  const handleDownloadLibraryExcel = () => {
+    if (examples.length === 0) return;
+
+    const data = examples.map(ex => ({
+      '유형': ex.type,
+      '제목': ex.title,
+      '팀/부서': ex.teamName || '미인식',
+      '제안자': ex.proposerName || '미인식',
+      '내용 요약': ex.content,
+      '판정 근거': ex.reasoning
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Stored Cases");
+    
+    XLSX.writeFile(workbook, `stored_cases_${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
+  // Library Analysis Calculations
+  const totalCount = examples.length;
+  const passCount = examples.filter(ex => ex.type === 'PASS').length;
+  const failCount = examples.filter(ex => ex.type === 'FAIL').length;
+  const passRatio = totalCount > 0 ? Math.round((passCount / totalCount) * 100) : 0;
+  const failRatio = totalCount > 0 ? Math.round((failCount / totalCount) * 100) : 0;
+
+  // Extract common failure reasons (top 5)
+  const failureReasons = useMemo(() => {
+    const reasons: { [key: string]: number } = {};
+    examples
+      .filter(e => e.type === 'FAIL')
+      .forEach(e => {
+        // Simple heuristic: take first sentence or first 60 chars
+        const reason = e.reasoning.split(/[.\n]/)[0].trim().substring(0, 60);
+        if (reason && reason.length > 5) {
+          reasons[reason] = (reasons[reason] || 0) + 1;
+        }
+      });
+    
+    return Object.entries(reasons)
+      .map(([text, count]) => ({ text, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+  }, [examples]);
+
+  // Library Search Logic
+  useEffect(() => {
+    if (!librarySearchQuery.trim()) {
+      setLibrarySearchResults([]);
+      return;
+    }
+
+    const query = librarySearchQuery.toLowerCase();
+    const results = examples.filter(e => 
+      e.title.toLowerCase().includes(query) || 
+      (e.teamName && e.teamName.toLowerCase().includes(query)) ||
+      (e.proposerName && e.proposerName.toLowerCase().includes(query))
+    );
+    setLibrarySearchResults(results);
+  }, [librarySearchQuery, examples]);
+
+  const handleSearchResultClick = (id: string) => {
+    const element = document.getElementById(`example-${id}`);
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      element.classList.add('ring-2', 'ring-blue-500', 'ring-offset-2');
+      setTimeout(() => {
+        element.classList.remove('ring-2', 'ring-blue-500', 'ring-offset-2');
+      }, 2000);
     }
   };
 
@@ -403,36 +554,20 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-8">
-          <section>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-serif italic text-sm opacity-60">Evaluation Criteria</h2>
-              <button 
-                onClick={() => setIsCriteriaModalOpen(true)}
-                className="p-1 hover:bg-[#141414]/5 rounded-full transition-colors"
-              >
-                <Settings className="w-4 h-4 opacity-40" />
-              </button>
-            </div>
-            
-            <div className="space-y-3">
-              {criteria.map((c) => (
-                <div key={c.id} className="group relative p-3 border border-[#141414]/10 bg-white/50 rounded-sm">
-                  <div className="flex items-start gap-2">
-                    <div className={cn(
-                      "mt-1 w-2 h-2 rounded-full flex-shrink-0",
-                      c.isMandatory ? "bg-red-500" : "bg-blue-500"
-                    )} />
-                    <p className="text-xs leading-relaxed pr-6">{c.text}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
+        <div className="p-6 border-b border-[#141414]/10">
+          <div className="flex items-center justify-between">
+            <h2 className="font-serif italic text-sm opacity-60">Evaluation Criteria</h2>
+            <button 
+              onClick={() => setIsCriteriaModalOpen(true)}
+              className="p-1 hover:bg-[#141414]/5 rounded-full transition-colors"
+            >
+              <Settings className="w-4 h-4 opacity-40" />
+            </button>
+          </div>
         </div>
 
         {/* AI Chat Window */}
-        <div className="p-4 border-t border-[#141414] bg-[#D6D5D2] flex flex-col h-[300px]">
+        <div className="flex-1 p-4 bg-white flex flex-col overflow-hidden">
           <div className="flex items-center gap-2 mb-2 text-[10px] uppercase tracking-widest opacity-60">
             <Info className="w-3 h-3" />
             <span>AI Chat</span>
@@ -464,7 +599,7 @@ export default function App() {
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
               placeholder="메시지를 입력하세요..."
-              className="w-full p-2 pr-8 text-[11px] bg-white border border-[#141414] focus:outline-none"
+              className="w-full p-2 pr-8 text-[11px] bg-[#F5F5F3] border border-[#141414] focus:outline-none"
             />
             <button 
               onClick={handleSendMessage}
@@ -480,58 +615,54 @@ export default function App() {
       {/* Main Content */}
       <main className="flex-1 flex flex-col overflow-hidden">
         {view === 'dashboard' ? (
-          <>
-            {/* Header / Upload Area */}
-            <header className="p-8 border-b border-[#141414] bg-[#E4E3E0] z-10">
-              <div 
-                onDragEnter={handleDrag}
-                onDragLeave={handleDrag}
-                onDragOver={handleDrag}
-                onDrop={handleDrop}
-                className={cn(
-                  "relative border-2 border-dashed border-[#141414] p-12 flex flex-col items-center justify-center transition-all",
-                  dragActive ? "bg-[#141414] text-[#E4E3E0]" : "bg-white/30 hover:bg-white/50",
-                  isEvaluating && "pointer-events-none opacity-50"
-                )}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  accept=".pdf,.pptx"
-                  onChange={(e) => handleFileUpload(e.target.files)}
-                  className="hidden"
-                />
-                
-                {isEvaluating ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <Loader2 className="w-12 h-12 animate-spin" />
-                    <p className="font-serif italic text-xl">Analyzing Documents...</p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="w-16 h-16 rounded-full border border-current flex items-center justify-center">
-                      <FileUp className="w-8 h-8" />
-                    </div>
-                    <div className="text-center">
-                      <h3 className="font-serif italic text-2xl mb-2">Upload Proposals</h3>
-                      <p className="text-xs opacity-60 uppercase tracking-widest">Drag & Drop or <button onClick={() => fileInputRef.current?.click()} className="underline font-bold">Browse Files</button></p>
-                      <p className="text-[10px] opacity-40 mt-2 uppercase tracking-tighter">Supports PDF & PPTX (Max 80 files)</p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </header>
-
-            {/* Results Area */}
-            <div className="flex-1 flex overflow-hidden">
-              {/* List of Evaluations */}
-              <div className="w-1/3 border-r border-[#141414] overflow-y-auto bg-[#D6D5D2]">
-                <div className="sticky top-0 p-4 border-b border-[#141414] bg-[#D6D5D2] flex items-center justify-between">
-                  <h3 className="font-serif italic text-sm">Evaluation History</h3>
+          <div className="flex-1 flex overflow-hidden">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.pptx,.docx,.txt"
+              onChange={(e) => handleFileUpload(e.target.files)}
+              className="hidden"
+            />
+            
+            {/* List of Evaluations (Sidebar) */}
+            <div className="w-1/3 border-r border-[#141414] overflow-y-auto bg-[#F5F5F3] flex flex-col">
+              <div className="sticky top-0 h-14 p-4 border-b border-[#141414] bg-[#D6D5D2] flex items-center justify-between z-20">
+                <h3 className="font-serif italic text-sm">Evaluation History</h3>
+                <div className="flex items-center gap-2">
+                  {evaluations.length > 0 && (
+                    <button 
+                      onClick={handleDownloadExcel}
+                      className="p-1 hover:bg-[#141414]/10 text-[#141414] rounded-sm transition-colors"
+                      title="Download Excel"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  {evaluations.length > 0 && (
+                    <button 
+                      onClick={() => {
+                        showConfirm(
+                          '전체 이력 삭제',
+                          '모든 평가 이력을 삭제하시겠습니까?',
+                          () => {
+                            setEvaluations([]);
+                            setSelectedEval(null);
+                            toast.success('모든 평가 이력이 삭제되었습니다.');
+                          }
+                        );
+                      }}
+                      className="p-1 hover:bg-red-500/10 text-red-600 rounded-sm transition-colors"
+                      title="Clear All History"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   <History className="w-4 h-4 opacity-40" />
                 </div>
-                
+              </div>
+              
+              <div className="flex-1 overflow-y-auto">
                 {evaluations.length === 0 ? (
                   <div className="p-12 text-center opacity-30">
                     <FileText className="w-12 h-12 mx-auto mb-4" />
@@ -540,39 +671,118 @@ export default function App() {
                 ) : (
                   <div className="divide-y divide-[#141414]">
                     {evaluations.map((ev) => (
-                      <button
+                      <div
                         key={ev.id}
                         onClick={() => setSelectedEval(ev)}
                         className={cn(
-                          "w-full p-4 text-left transition-all hover:bg-[#141414] hover:text-[#E4E3E0] group",
+                          "w-full p-4 text-left transition-all hover:bg-[#141414] hover:text-[#E4E3E0] group cursor-pointer",
                           selectedEval?.id === ev.id ? "bg-[#141414] text-[#E4E3E0]" : "bg-transparent"
                         )}
                       >
                         <div className="flex items-start justify-between mb-2">
-                          <span className="text-[10px] font-mono opacity-50">
-                            {new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-mono opacity-50">
+                              {new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                            {selectedEval?.id === ev.id && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  showConfirm(
+                                    '이력 삭제',
+                                    `'${ev.fileName}' 평가 이력을 삭제하시겠습니까?`,
+                                    () => {
+                                      setEvaluations(prev => prev.filter(item => item.id !== ev.id));
+                                      if (selectedEval?.id === ev.id) setSelectedEval(null);
+                                      toast.success('평가 이력이 삭제되었습니다.');
+                                    }
+                                  );
+                                }}
+                                className="p-0.5 hover:bg-white/20 rounded-full transition-colors"
+                                title="Delete this entry"
+                              >
+                                <X className="w-2.5 h-2.5" />
+                              </button>
+                            )}
+                          </div>
                           <div className={cn(
-                            "px-2 py-0.5 text-[9px] font-bold uppercase tracking-tighter rounded-full",
+                            "px-2 py-0.5 text-[9px] font-bold uppercase tracking-tighter rounded-full border",
                             (ev.userDecision || ev.aiDecision) === 'PASS' 
-                              ? "bg-green-500/20 text-green-700 group-hover:bg-green-500 group-hover:text-white" 
-                              : "bg-red-500/20 text-red-700 group-hover:bg-red-500 group-hover:text-white"
+                              ? "bg-[#dcfce7] text-[#15803d] border-[#bbf7d0] group-hover:bg-[#16a34a] group-hover:text-white group-hover:border-[#16a34a]" 
+                              : "bg-[#fee2e2] text-[#b91c1c] border-[#fecaca] group-hover:bg-[#dc2626] group-hover:text-white group-hover:border-[#dc2626]"
                           )}>
                             {ev.userDecision || ev.aiDecision}
                           </div>
                         </div>
-                        <h4 className="text-xs font-medium truncate mb-1">{ev.fileName}</h4>
+                        <h4 className="text-xs font-medium truncate mb-0.5">{ev.fileName}</h4>
+                        {(ev.teamName || ev.proposerName) && (
+                          <p className="text-[9px] font-bold uppercase tracking-widest opacity-60 mb-1 flex items-center gap-1">
+                            <BookOpen className="w-2.5 h-2.5" /> 
+                            {ev.teamName && <span>[{ev.teamName}] </span>}
+                            {ev.proposerName}
+                          </p>
+                        )}
                         <p className="text-[10px] opacity-60 line-clamp-2 italic font-serif">
                           {ev.reasoning}
                         </p>
-                      </button>
+                      </div>
                     ))}
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Right Content Area (Upload + Detail) */}
+            <div 
+              onDragEnter={handleDrag}
+              onDragLeave={handleDrag}
+              onDragOver={handleDrag}
+              onDrop={handleDrop}
+              className={cn(
+                "flex-1 flex flex-col overflow-hidden bg-[#F5F5F3] transition-all relative",
+                dragActive && "bg-[#141414]/5"
+              )}
+            >
+              {/* Upload Header */}
+              <div className="h-14 p-4 border-b border-[#141414] bg-[#D6D5D2] flex items-center justify-between z-10">
+                <div className="flex items-center gap-3">
+                  <h3 className="font-serif italic text-sm">Upload Proposals</h3>
+                  {isEvaluating && (
+                    <div className="flex items-center gap-2 px-2 py-0.5 bg-[#141414] text-[#E4E3E0] text-[9px] font-bold uppercase tracking-widest rounded-full">
+                      <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                      <span>Analyzing...</span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-4">
+                  {!isEvaluating && (
+                    <>
+                      <p className="text-[10px] opacity-60 uppercase tracking-widest hidden lg:block">
+                        Drag & Drop or <button onClick={() => fileInputRef.current?.click()} className="underline font-bold">Browse</button>
+                      </p>
+                      <button 
+                        onClick={() => fileInputRef.current?.click()}
+                        className="p-1.5 border border-[#141414] hover:bg-[#141414] hover:text-[#E4E3E0] transition-all flex items-center gap-2"
+                        title="Upload Files"
+                      >
+                        <UploadCloud className="w-3.5 h-3.5" />
+                        <span className="text-[10px] font-bold uppercase tracking-widest">New Upload</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
 
               {/* Detail View */}
-              <div className="flex-1 overflow-y-auto bg-white p-12">
+              <div className="flex-1 overflow-y-auto p-12">
+                {dragActive && (
+                  <div className="absolute inset-0 z-50 bg-[#141414]/90 flex flex-col items-center justify-center text-[#E4E3E0] pointer-events-none">
+                    <UploadCloud className="w-16 h-16 mb-4 animate-bounce" />
+                    <h3 className="font-serif italic text-3xl mb-2">Drop to Upload</h3>
+                    <p className="text-xs uppercase tracking-widest opacity-60">PDF, PPTX, DOCX & TXT (Max 80 files)</p>
+                  </div>
+                )}
+                
                 <AnimatePresence mode="wait">
                   {selectedEval ? (
                     <motion.div
@@ -585,13 +795,18 @@ export default function App() {
                       {/* Result Header */}
                       <div className="flex items-start justify-between border-b border-[#141414] pb-8">
                         <div>
-                          <h2 className="font-serif italic text-4xl mb-4">{selectedEval.fileName}</h2>
+                          <h2 className="font-serif italic text-4xl mb-2">{selectedEval.fileName}</h2>
+                          {selectedEval.proposerName && (
+                            <p className="text-sm font-bold text-[#141414]/70 mb-4 uppercase tracking-widest flex items-center gap-2">
+                              <BookOpen className="w-4 h-4" /> {selectedEval.proposerName}
+                            </p>
+                          )}
                           <div className="flex items-center gap-4">
                             <div className="flex flex-col">
                               <span className="text-[10px] uppercase tracking-widest opacity-40">AI Decision</span>
                               <span className={cn(
                                 "text-xl font-bold tracking-tighter",
-                                selectedEval.aiDecision === 'PASS' ? "text-green-600" : "text-red-600"
+                                selectedEval.aiDecision === 'PASS' ? "text-[#16a34a]" : "text-[#dc2626]"
                               )}>
                                 {selectedEval.aiDecision}
                               </span>
@@ -601,7 +816,7 @@ export default function App() {
                                 <span className="text-[10px] uppercase tracking-widest opacity-40">User Override</span>
                                 <span className={cn(
                                   "text-xl font-bold tracking-tighter",
-                                  selectedEval.userDecision === 'PASS' ? "text-green-600" : "text-red-600"
+                                  selectedEval.userDecision === 'PASS' ? "text-[#16a34a]" : "text-[#dc2626]"
                                 )}>
                                   {selectedEval.userDecision}
                                 </span>
@@ -674,6 +889,20 @@ export default function App() {
                           {selectedEval.tableSummary}
                         </div>
                       </section>
+
+                      {/* User Decision Reasoning */}
+                      <section className="space-y-4">
+                        <div className="flex items-center justify-between border-b border-[#141414]/10 pb-2">
+                          <h3 className="font-serif italic text-xl">Decision Reasoning</h3>
+                          <span className="text-[10px] uppercase tracking-widest opacity-50 italic">Optional: Overrides AI reasoning in library</span>
+                        </div>
+                        <textarea
+                          value={selectedEval.userReasoning || ''}
+                          onChange={(e) => handleUserReasoningChange(selectedEval.id, e.target.value)}
+                          placeholder="Enter your reasoning for this decision here... (If left blank, it will be stored as empty in the library)"
+                          className="w-full p-6 bg-white border border-[#141414]/10 rounded-sm font-sans text-sm leading-relaxed min-h-[150px] focus:outline-none focus:border-[#141414]/30 transition-all"
+                        />
+                      </section>
                     </motion.div>
                   ) : (
                     <div className="h-full flex flex-col items-center justify-center opacity-20 text-center">
@@ -685,221 +914,277 @@ export default function App() {
                 </AnimatePresence>
               </div>
             </div>
-          </>
+          </div>
         ) : (
-          /* Reference Library View */
-          <div className="flex-1 overflow-y-auto bg-white p-12">
-            <div className="max-w-4xl mx-auto space-y-12">
-              <header className="border-b border-[#141414] pb-8 flex items-end justify-between">
-                <div>
-                  <h2 className="font-serif italic text-4xl mb-2">Reference Library</h2>
-                  <p className="text-xs uppercase tracking-widest opacity-60">Manage PASS/FAIL examples for AI learning</p>
-                </div>
-                <div className="flex gap-2">
-                  <input 
-                    ref={libraryInputRef}
-                    type="file"
-                    multiple
-                    accept=".pdf,.pptx"
-                    className="hidden"
-                    onChange={(e) => {
-                      if (ingestType) {
-                        handleBulkIngest(e.target.files, ingestType);
-                        setIngestType(null);
-                      }
-                    }}
-                  />
+          /* Reference Library View - Split Layout */
+          <div className="flex-1 flex overflow-hidden bg-white">
+            {/* Left: Controls & Add Form */}
+            <div className="w-[400px] border-r border-[#141414] overflow-y-auto bg-[#F5F5F3] flex flex-col">
+              <header className="px-6 py-8 border-b border-[#141414] bg-[#D6D5D2] flex flex-col justify-center min-h-[116px]">
+                <h2 className="font-serif italic text-2xl">Reference Library</h2>
+              </header>
+
+              <div className="flex-1 overflow-y-auto p-8 space-y-10">
+                {/* Library Analysis Section */}
+                <section className="space-y-8">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-serif italic text-xl">Library Analysis</h3>
+                    <span className="text-[10px] uppercase tracking-widest opacity-40">Total {totalCount} Cases</span>
+                  </div>
+
+                  {/* Pass/Fail Ratio */}
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between text-[10px] uppercase tracking-widest font-bold">
+                      <span>Pass Ratio</span>
+                      <span>{passRatio}%</span>
+                    </div>
+                    <div className="h-2 w-full bg-[#141414]/5 rounded-full overflow-hidden flex">
+                      <div 
+                        className="h-full bg-[#16a34a] transition-all duration-1000" 
+                        style={{ width: `${passRatio}%` }}
+                      />
+                      <div 
+                        className="h-full bg-[#dc2626] transition-all duration-1000" 
+                        style={{ width: `${failRatio}%` }}
+                      />
+                    </div>
+                    <div className="flex justify-between text-[9px] opacity-50 italic">
+                      <span>{passCount} Passed</span>
+                      <span>{failCount} Failed</span>
+                    </div>
+                  </div>
+
+                  {/* Top Failure Reasons */}
+                  <div className="space-y-4">
+                    <h4 className="text-[10px] uppercase tracking-widest font-bold opacity-50">Top Failure Reasons</h4>
+                    {failureReasons.length > 0 ? (
+                      <div className="space-y-2">
+                        {failureReasons.map((reason, i) => (
+                          <div key={i} className="flex items-center gap-3 p-3 bg-white border border-[#141414]/5 rounded-sm">
+                            <span className="text-xs font-serif italic opacity-30">0{i+1}</span>
+                            <p className="text-[10px] leading-tight flex-1 line-clamp-2">{reason.text}</p>
+                            <span className="text-[10px] font-bold opacity-50">{reason.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-[10px] opacity-40 italic">No failure data available yet.</p>
+                    )}
+                  </div>
+
+                  {/* Search Section */}
+                  <div className="space-y-4 pt-4 border-t border-[#141414]/10">
+                    <h4 className="text-[10px] uppercase tracking-widest font-bold opacity-50">Search Library</h4>
+                    <div className="relative">
+                      <input 
+                        type="text"
+                        value={librarySearchQuery}
+                        onChange={(e) => setLibrarySearchQuery(e.target.value)}
+                        placeholder="Search by Team or Title..."
+                        className="w-full p-3 pl-10 text-xs border border-[#141414] focus:outline-none bg-white"
+                      />
+                      <BookOpen className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 opacity-30" />
+                    </div>
+
+                    {/* Search Results */}
+                    {librarySearchQuery && (
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
+                        {librarySearchResults.length > 0 ? (
+                          librarySearchResults.map(res => (
+                            <button
+                              key={res.id}
+                              onClick={() => handleSearchResultClick(res.id)}
+                              className="w-full text-left p-3 bg-white border border-[#141414]/10 hover:border-[#141414] transition-all group"
+                            >
+                              <div className="flex items-center justify-between mb-1">
+                                <span className={cn(
+                                  "text-[8px] uppercase tracking-widest px-1.5 py-0.5 rounded-sm",
+                                  res.type === 'PASS' ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+                                )}>
+                                  {res.type}
+                                </span>
+                                <span className="text-[9px] opacity-40">{res.teamName || 'No Team'}</span>
+                              </div>
+                              <p className="text-[10px] font-bold truncate group-hover:text-blue-600">{res.title}</p>
+                            </button>
+                          ))
+                        ) : (
+                          <p className="text-[10px] opacity-40 italic text-center py-4">No results found.</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            {/* Right: Stored Cases List */}
+            <div className="flex-1 overflow-hidden bg-[#F5F5F3] flex flex-col">
+              <header className="px-6 py-8 border-b border-[#141414] bg-[#D6D5D2] flex items-center justify-between min-h-[116px]">
+                <h3 className="font-serif italic text-2xl">Stored Cases</h3>
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] uppercase tracking-widest font-bold bg-[#141414] text-white px-2 py-1">
+                    Total {examples.length}
+                  </span>
                   <button 
-                    onClick={() => {
-                      setIngestType('PASS');
-                      libraryInputRef.current?.click();
-                    }}
-                    disabled={isIngesting}
-                    className="px-4 py-3 bg-green-600 text-white text-[10px] uppercase tracking-widest flex items-center gap-2 hover:bg-green-700 disabled:opacity-50"
+                    onClick={handleDownloadLibraryExcel}
+                    disabled={examples.length === 0}
+                    className="flex items-center gap-2 px-3 py-1.5 border border-[#141414] text-[10px] uppercase tracking-widest hover:bg-[#141414] hover:text-white transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#141414]"
                   >
-                    {isIngesting && ingestType === 'PASS' ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
-                    Bulk PASS
-                  </button>
-                  <button 
-                    onClick={() => {
-                      setIngestType('FAIL');
-                      libraryInputRef.current?.click();
-                    }}
-                    disabled={isIngesting}
-                    className="px-4 py-3 bg-red-600 text-white text-[10px] uppercase tracking-widest flex items-center gap-2 hover:bg-red-700 disabled:opacity-50"
-                  >
-                    {isIngesting && ingestType === 'FAIL' ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
-                    Bulk FAIL
+                    <FileText className="w-3 h-3" /> Export Excel
                   </button>
                   {selectedExampleIds.length > 0 && (
                     <button 
                       onClick={handleDeleteSelected}
-                      className="px-4 py-3 bg-red-500 text-white text-[10px] uppercase tracking-widest flex items-center gap-2 hover:bg-red-600 transition-colors"
+                      className="text-[10px] uppercase tracking-widest text-red-600 flex items-center gap-1 hover:underline"
                     >
-                      <Trash2 className="w-4 h-4" />
-                      Delete Selected ({selectedExampleIds.length})
+                      <Trash2 className="w-3 h-3" /> Delete Selected ({selectedExampleIds.length})
                     </button>
                   )}
                 </div>
               </header>
 
-              {/* Add Example Form */}
-              <section className="p-8 bg-[#F5F5F3] border border-[#141414]/10 space-y-6">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-serif italic text-xl">Add Manual Case</h3>
-                  <div className="flex items-center gap-4">
-                    <input 
-                      ref={manualFileInputRef}
-                      type="file"
-                      accept=".pdf,.pptx"
-                      className="hidden"
-                      onChange={(e) => setManualFile(e.target.files?.[0] || null)}
-                    />
-                    <button 
-                      onClick={() => manualFileInputRef.current?.click()}
-                      className="text-[10px] uppercase tracking-widest flex items-center gap-2 px-3 py-1.5 border border-[#141414] hover:bg-[#141414] hover:text-white transition-all"
-                    >
-                      <UploadCloud className="w-3.5 h-3.5" />
-                      {manualFile ? manualFile.name : 'Upload File (Optional)'}
-                    </button>
-                    {manualFile && (
-                      <button onClick={() => setManualFile(null)} className="text-red-500">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-6">
-                  <div className="space-y-4">
-                    {!manualFile && (
-                      <>
-                        <div>
-                          <label className="text-[10px] uppercase tracking-widest opacity-50 block mb-1">Case Title</label>
-                          <input 
-                            type="text"
-                            value={newExample.title}
-                            onChange={(e) => setNewExample({...newExample, title: e.target.value})}
-                            placeholder="e.g., 2023 AI R&D Proposal"
-                            className="w-full p-3 text-xs border border-[#141414] focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-[10px] uppercase tracking-widest opacity-50 block mb-1">Content Summary</label>
-                          <textarea 
-                            value={newExample.content}
-                            onChange={(e) => setNewExample({...newExample, content: e.target.value})}
-                            placeholder="Summarize the key features of this proposal..."
-                            className="w-full p-3 text-xs border border-[#141414] focus:outline-none h-24 resize-none"
-                          />
-                        </div>
-                      </>
-                    )}
-                    <div>
-                      <label className="text-[10px] uppercase tracking-widest opacity-50 block mb-1">Decision Type</label>
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={() => setNewExample({...newExample, type: 'PASS'})}
-                          className={cn(
-                            "flex-1 py-2 text-[10px] uppercase tracking-widest border border-[#141414]",
-                            newExample.type === 'PASS' ? "bg-green-600 text-white border-green-600" : "opacity-40"
-                          )}
-                        >
-                          Pass Case
-                        </button>
-                        <button 
-                          onClick={() => setNewExample({...newExample, type: 'FAIL'})}
-                          className={cn(
-                            "flex-1 py-2 text-[10px] uppercase tracking-widest border border-[#141414]",
-                            newExample.type === 'FAIL' ? "bg-red-600 text-white border-red-600" : "opacity-40"
-                          )}
-                        >
-                          Fail Case
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="space-y-4">
-                    <div>
-                      <label className="text-[10px] uppercase tracking-widest opacity-50 block mb-1">Decision Reasoning</label>
-                      <textarea 
-                        value={newExample.reasoning}
-                        onChange={(e) => setNewExample({...newExample, reasoning: e.target.value})}
-                        placeholder="Explain why this was passed or failed..."
-                        className="w-full p-3 text-xs border border-[#141414] focus:outline-none h-48 resize-none"
-                      />
-                    </div>
-                  </div>
-                </div>
-                <button 
-                  onClick={handleAddExample}
-                  disabled={isIngesting}
-                  className="w-full py-3 bg-[#141414] text-[#E4E3E0] text-[10px] uppercase tracking-[0.2em] font-bold hover:bg-[#141414]/90 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {isIngesting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  Save to Library
-                </button>
-              </section>
-
-              {/* Examples List */}
-              <section className="space-y-6">
-                <h3 className="font-serif italic text-xl border-b border-[#141414]/10 pb-2">Stored Cases ({examples.length})</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  {examples.map((ex) => (
+              <div className="flex-1 overflow-y-auto p-10">
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 content-start">
+                  {examples.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((ex) => (
                     <div 
                       key={ex.id} 
-                      className={cn(
-                        "p-6 border transition-all relative group cursor-pointer",
-                        selectedExampleIds.includes(ex.id) ? "border-[#141414] bg-[#F5F5F3]" : "border-[#141414]/20 hover:border-[#141414]/40"
-                      )}
+                      id={`example-${ex.id}`}
                       onClick={() => toggleExampleSelection(ex.id)}
+                      className={cn(
+                        "p-3 border transition-all relative group bg-white cursor-pointer h-fit",
+                        selectedExampleIds.includes(ex.id) ? "border-[#141414] ring-1 ring-[#141414]" : "border-[#141414]/10 hover:border-[#141414]/30",
+                        editingExampleId === ex.id && "ring-2 ring-blue-500 border-blue-500"
+                      )}
                     >
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                          <input 
-                            type="checkbox"
-                            checked={selectedExampleIds.includes(ex.id)}
-                            onChange={() => {}} // Handled by parent div onClick
-                            className="w-4 h-4 accent-[#141414]"
-                          />
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <div className={cn(
+                            "w-2.5 h-2.5 border border-[#141414] flex items-center justify-center",
+                            selectedExampleIds.includes(ex.id) ? "bg-[#141414]" : "bg-white"
+                          )}>
+                            {selectedExampleIds.includes(ex.id) && <div className="w-1 h-1 bg-white" />}
+                          </div>
                           <span className={cn(
-                            "px-2 py-0.5 text-[9px] font-bold uppercase tracking-tighter rounded-full",
-                            ex.type === 'PASS' ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+                            "px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-tighter rounded-full border",
+                            ex.type === 'PASS' ? "bg-[#dcfce7] text-[#15803d] border-[#bbf7d0]" : "bg-[#fee2e2] text-[#b91c1c] border-[#fecaca]"
                           )}>
                             {ex.type}
                           </span>
+                          {(ex.teamName || ex.proposerName) && (
+                            <span className="text-[7px] uppercase tracking-widest opacity-40 italic">
+                              [{ex.teamName || '미인식'}] {ex.proposerName}
+                            </span>
+                          )}
                         </div>
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleRemoveExample(ex.id);
-                          }}
-                          className="opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Trash2 className="w-3 h-3 text-red-500" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          {editingExampleId !== ex.id && (
+                            <button 
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleStartEdit(ex);
+                              }}
+                              className="p-1 hover:bg-blue-50 rounded-full transition-all text-blue-500 opacity-40 group-hover:opacity-100"
+                              title="Edit Reasoning"
+                            >
+                              <Pencil className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                          <button 
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveExample(ex.id);
+                            }}
+                            className="p-1 hover:bg-red-50 rounded-full transition-all text-red-500 opacity-40 group-hover:opacity-100"
+                          >
+                            <Trash2 className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
                       </div>
-                      <h4 className="font-serif italic text-lg mb-2">{ex.title}</h4>
-                      <div className="space-y-3">
+                      <h4 className="font-serif italic text-base mb-1 truncate">{ex.title}</h4>
+                      <div className="space-y-1.5">
                         <div>
-                          <span className="text-[9px] uppercase tracking-widest opacity-40 block">Content</span>
-                          <p className="text-[11px] leading-relaxed line-clamp-3">{ex.content}</p>
+                          <p className="text-[9px] leading-relaxed line-clamp-2 text-[#141414]/80">{ex.content}</p>
                         </div>
-                        <div>
-                          <span className="text-[9px] uppercase tracking-widest opacity-40 block">Reasoning</span>
-                          <p className="text-[11px] leading-relaxed italic line-clamp-3">{ex.reasoning}</p>
+                        <div className="pt-1.5 border-t border-[#141414]/5">
+                          {editingExampleId === ex.id ? (
+                            <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
+                              <textarea
+                                value={editingReasoning}
+                                onChange={(e) => setEditingReasoning(e.target.value)}
+                                className="w-full p-2 text-[9px] border border-[#141414] focus:outline-none min-h-[80px] bg-white"
+                                autoFocus
+                              />
+                              <div className="flex justify-end gap-1">
+                                <button
+                                  onClick={() => setEditingExampleId(null)}
+                                  className="px-2 py-1 text-[8px] uppercase tracking-widest border border-[#141414] hover:bg-[#141414]/5"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => handleSaveEdit(ex.id)}
+                                  className="px-2 py-1 text-[8px] uppercase tracking-widest bg-[#141414] text-white"
+                                >
+                                  Save
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <p className="text-[9px] leading-relaxed italic line-clamp-2 text-[#141414]">{ex.reasoning}</p>
+                          )}
                         </div>
                       </div>
                     </div>
                   ))}
                   {examples.length === 0 && (
-                    <div className="col-span-2 p-12 text-center border border-dashed border-[#141414]/20 opacity-30">
-                      <BookOpen className="w-12 h-12 mx-auto mb-4" />
-                      <p className="text-xs uppercase tracking-widest">Library is empty</p>
+                    <div className="col-span-full py-20 text-center border border-dashed border-[#141414]/20 opacity-30">
+                      <BookOpen className="w-16 h-16 mx-auto mb-4" />
+                      <p className="text-xs uppercase tracking-widest">Library is empty. Add cases to improve AI accuracy.</p>
                     </div>
                   )}
                 </div>
-              </section>
+              </div>
+
+              {/* Pagination Controls - Fixed at bottom to align with chat input */}
+              {examples.length > itemsPerPage && (
+                <div className="p-4 bg-[#F5F5F3] flex items-center justify-center gap-2">
+                  <button 
+                    onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                    disabled={currentPage === 1}
+                    className="p-1.5 hover:bg-[#141414]/5 disabled:opacity-20 transition-all"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: Math.ceil(examples.length / itemsPerPage) }, (_, i) => i + 1).map((page) => (
+                      <button
+                        key={page}
+                        onClick={() => setCurrentPage(page)}
+                        className={cn(
+                          "w-7 h-7 text-[10px] font-bold transition-all border",
+                          currentPage === page 
+                            ? "bg-[#141414] text-white border-[#141414]" 
+                            : "border-transparent hover:border-[#141414]/20"
+                        )}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button 
+                    onClick={() => setCurrentPage(prev => Math.min(Math.ceil(examples.length / itemsPerPage), prev + 1))}
+                    disabled={currentPage === Math.ceil(examples.length / itemsPerPage)}
+                    className="p-1.5 hover:bg-[#141414]/5 disabled:opacity-20 transition-all"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -930,7 +1215,29 @@ export default function App() {
               </div>
               <div className="p-6 space-y-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-widest opacity-60 block">Base URL (OpenAI Compatible)</label>
+                  <label className="text-[10px] uppercase tracking-widest opacity-60 block">AI Model ID</label>
+                  <input 
+                    type="text"
+                    value={aiConfig.modelId}
+                    onChange={(e) => setAiConfig(prev => ({ ...prev, modelId: e.target.value }))}
+                    placeholder="gemini-3-flash-preview"
+                    className="w-full p-3 text-xs bg-white border border-[#141414] focus:outline-none"
+                  />
+                  <p className="text-[9px] opacity-40 italic">Default: gemini-3-flash-preview</p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-widest opacity-60 block">Custom API Key (Optional)</label>
+                  <input 
+                    type="password"
+                    value={aiConfig.apiKey}
+                    onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value }))}
+                    placeholder="Enter your own API key if needed"
+                    className="w-full p-3 text-xs bg-white border border-[#141414] focus:outline-none"
+                  />
+                  <p className="text-[9px] opacity-40 italic">비워두면 시스템 기본 Gemini API 키를 사용합니다.</p>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] uppercase tracking-widest opacity-60 block">Base URL (For OpenAI Compatible APIs)</label>
                   <input 
                     type="text"
                     value={aiConfig.baseUrl}
@@ -938,30 +1245,11 @@ export default function App() {
                     placeholder="https://api.openai.com/v1"
                     className="w-full p-3 text-xs bg-white border border-[#141414] focus:outline-none"
                   />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-widest opacity-60 block">API Key</label>
-                  <input 
-                    type="password"
-                    value={aiConfig.apiKey}
-                    onChange={(e) => setAiConfig(prev => ({ ...prev, apiKey: e.target.value }))}
-                    placeholder="sk-..."
-                    className="w-full p-3 text-xs bg-white border border-[#141414] focus:outline-none"
-                  />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] uppercase tracking-widest opacity-60 block">Model ID</label>
-                  <input 
-                    type="text"
-                    value={aiConfig.modelId}
-                    onChange={(e) => setAiConfig(prev => ({ ...prev, modelId: e.target.value }))}
-                    placeholder="gpt-4o"
-                    className="w-full p-3 text-xs bg-white border border-[#141414] focus:outline-none"
-                  />
+                  <p className="text-[9px] opacity-40 italic">OpenAI 호환 API를 사용할 때만 입력하세요.</p>
                 </div>
                 <div className="pt-4 flex items-center gap-2 text-[10px] text-blue-600 bg-blue-50 p-3 border border-blue-200">
                   <Info className="w-4 h-4 flex-shrink-0" />
-                  <p>설정된 정보는 브라우저의 로컬 스토리지에 안전하게 저장됩니다.</p>
+                  <p>Gemini 모델을 사용하면 별도의 설정 없이 바로 이용 가능합니다.</p>
                 </div>
               </div>
               <div className="p-6 border-t border-[#141414] bg-[#D6D5D2] flex justify-end">
@@ -1064,6 +1352,51 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* Custom Confirm Modal */}
+      <AnimatePresence>
+        {confirmModal.isOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-[#E4E3E0] border border-[#141414] shadow-2xl p-6 space-y-6"
+            >
+              <div className="space-y-2">
+                <h3 className="font-serif italic text-xl">{confirmModal.title}</h3>
+                <p className="text-xs opacity-70 leading-relaxed">{confirmModal.message}</p>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button 
+                  onClick={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+                  className="px-4 py-2 border border-[#141414] text-[10px] uppercase tracking-widest hover:bg-[#141414]/5 transition-all"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => {
+                    confirmModal.onConfirm();
+                    setConfirmModal(prev => ({ ...prev, isOpen: false }));
+                  }}
+                  className="px-4 py-2 bg-red-600 text-white text-[10px] uppercase tracking-widest hover:bg-red-700 transition-all"
+                >
+                  Confirm
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <Toaster position="top-right" richColors closeButton />
     </div>
   );
 }
