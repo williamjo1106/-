@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import OpenAI from "openai";
 import { Criterion, EvaluationResponse, ReferenceExample, AIConfig, EvaluationResult } from "../types";
 import { SYSTEM_INSTRUCTION } from "../constants";
 import JSZip from "jszip";
@@ -179,8 +180,6 @@ export async function evaluateProposal(
 ): Promise<EvaluationResponse> {
   const { text: fileText, images } = await extractText(file);
   
-  const ai = new GoogleGenAI({ apiKey: config.apiKey || (process.env.GEMINI_API_KEY as string) });
-  
   const criteriaText = criteria
     .map((c: any) => `- [${c.isMandatory ? '필수' : '선택'}] ${c.text}`)
     .join('\n');
@@ -222,6 +221,35 @@ export async function evaluateProposal(
     6. **응답 형식**: 반드시 다음 JSON 형식으로만 응답해 주세요.
   `;
 
+  if (config.baseUrl) {
+    const openai = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.baseUrl,
+      dangerouslyAllowBrowser: true
+    });
+
+    const response = await openai.chat.completions.create({
+      model: config.modelId || "qwen-max",
+      messages: [
+        { role: "system", content: SYSTEM_INSTRUCTION },
+        { 
+          role: "user", 
+          content: [
+            { type: "text", text: prompt },
+            ...images.map(img => ({
+              type: "image_url",
+              image_url: { url: `data:${img.mimeType};base64,${img.data}` }
+            }))
+          ]
+        }
+      ],
+      response_format: { type: "json_object" }
+    });
+
+    return JSON.parse(response.choices[0].message.content || "{}");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: config.apiKey || (process.env.GEMINI_API_KEY as string) });
   const parts: any[] = [{ text: prompt }];
   
   // Add images to parts
@@ -268,8 +296,6 @@ export async function ingestReferenceFile(
 ): Promise<{ title: string; content: string; reasoning: string }> {
   const { text: fileText, images } = await extractText(file);
   
-  const ai = new GoogleGenAI({ apiKey: config.apiKey || (process.env.GEMINI_API_KEY as string) });
-  
   const prompt = `
     이 텍스트와 이미지는 기존의 [${type}] 사례입니다. 
     이 제안서의 핵심 내용을 상세히 요약하고, 특히 다른 제안서와 중복 여부를 판단할 수 있도록 고유한 특징, 기술적 방법론, 추진 단계 등을 구체적으로 포함해 주세요.
@@ -278,8 +304,45 @@ export async function ingestReferenceFile(
     
     제안서 텍스트 내용:
     ${fileText.substring(0, 30000)}
+    
+    반드시 다음 JSON 형식으로 응답해 주세요:
+    {
+      "title": "제안서 제목",
+      "content": "상세 요약 내용",
+      "reasoning": "합격/불합격 근거"
+    }
   `;
 
+  if (config.baseUrl) {
+    const openai = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.baseUrl,
+      dangerouslyAllowBrowser: true
+    });
+
+    const response = await openai.chat.completions.create({
+      model: config.modelId || "qwen-max",
+      messages: [
+        { role: "system", content: "당신은 제안서 분석 전문가입니다." },
+        { 
+          role: "user", 
+          content: [
+            { type: "text", text: prompt },
+            ...images.map(img => ({
+              type: "image_url",
+              image_url: { url: `data:${img.mimeType};base64,${img.data}` }
+            }))
+          ]
+        }
+      ],
+      response_format: { type: "json_object" }
+    });
+
+    return JSON.parse(response.choices[0].message.content || "{}");
+  }
+
+  const ai = new GoogleGenAI({ apiKey: config.apiKey || (process.env.GEMINI_API_KEY as string) });
+  
   const parts: any[] = [{ text: prompt }];
   images.forEach(img => {
     parts.push({
@@ -316,8 +379,6 @@ export async function chatWithAI(
   evaluations: EvaluationResult[] = [],
   examples: ReferenceExample[] = []
 ): Promise<{ role: 'assistant'; content: string }> {
-  const ai = new GoogleGenAI({ apiKey: config.apiKey || (process.env.GEMINI_API_KEY as string) });
-  
   const evaluationsContext = evaluations.length > 0 
     ? `
     현재 검토된 제안서 이력 (${evaluations.length}건):
@@ -355,6 +416,29 @@ export async function chatWithAI(
     4. **전문성 유지**: 간결하되 전문적인 용어를 사용하며, 데이터에 기반한 정확한 정보를 제공하세요.
   `;
 
+  if (config.baseUrl) {
+    const openai = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.baseUrl,
+      dangerouslyAllowBrowser: true
+    });
+
+    const response = await openai.chat.completions.create({
+      model: config.modelId || "qwen-max",
+      messages: [
+        { role: "system", content: systemInstruction },
+        ...messages.map(msg => ({
+          role: msg.role as "user" | "assistant",
+          content: msg.content
+        }))
+      ]
+    });
+
+    return { role: 'assistant', content: response.choices[0].message.content || "" };
+  }
+
+  const ai = new GoogleGenAI({ apiKey: config.apiKey || (process.env.GEMINI_API_KEY as string) });
+  
   const chat = ai.chats.create({
     model: config.modelId || "gemini-3-flash-preview",
     config: {
@@ -367,11 +451,6 @@ export async function chatWithAI(
     role: msg.role === 'user' ? 'user' : 'model',
     parts: [{ text: msg.content }]
   }));
-
-  // Re-create chat with history if needed, but for simplicity with sendMessage:
-  // Actually, sendMessage in @google/genai doesn't take history directly in the session if not provided at create.
-  // We can just send the last message. The chat session handles the turn if we keep it, 
-  // but here we are recreating it every time, so we should provide history.
   
   const response = await ai.models.generateContent({
     model: config.modelId || "gemini-3-flash-preview",
