@@ -214,10 +214,12 @@ export async function evaluateProposal(
     ${examplesText}
     
     ### 지시 사항
-    1. **중복 검토**: 현재 제안서가 위 '기존 참조 사례'에 있는 내용과 80% 이상 유사하거나 동일한지 확인하세요. 만약 중복된다면, 'reasoning' 필드에 "기존 사례([사례 제목])와 중복되는 과제입니다."라는 문구를 반드시 포함하고, 중복된 사례의 판정 결과를 따르거나 중복임을 사유로 FAIL을 줄 수 있습니다.
-    2. **기준 평가**: 설정된 '평가 기준'에 따라 제안서를 분석하세요.
-    3. **제안자 및 팀 식별**: 제안서의 **우측 상단(보통 제안일 바로 아래)**에 기재된 **제안자 이름**과 **팀/부서 이름**(예: "전략기획팀", "인사task", "홍길동")을 각각 찾아 'proposer_name'과 'team_name' 필드에 넣어주세요. 팀 이름은 "~~팀" 뿐만 아니라 "~~task", "~~부" 등 다양한 부서 명칭을 포함할 수 있습니다. 찾을 수 없다면 비워두세요.
-    4. **응답 형식**: 반드시 다음 JSON 형식으로만 응답해 주세요.
+    1. **중복 검토**: 현재 제안서가 위 '기존 참조 사례'에 있는 내용과 ${config.similarityThreshold}% 이상 유사하거나 동일한지 확인하세요. **만약 ${config.similarityThreshold}% 이상 중복된다면, 중복 과제임을 사유로 'ai_decision'을 반드시 FAIL로 판정하세요.** 'reasoning' 필드에는 "기존 사례([사례 제목])와 중복되는 과제입니다."라는 문구를 반드시 포함해야 합니다.
+    2. **유사도 점수**: 기존 사례 중 가장 유사한 사례와의 유사도를 0에서 100 사이의 숫자로 'similarity_score' 필드에 기재하세요. (${config.similarityThreshold}% 이상인 경우 특히 주의 깊게 확인)
+    3. **유사 사례 ID**: 가장 유사한 사례의 '사례 ID'를 'similar_case_id' 필드에 기재하세요. (유사도가 낮은 경우에도 가장 가까운 사례를 기재)
+    4. **기준 평가**: 설정된 '평가 기준'에 따라 제안서를 분석하세요.
+    5. **제안자 및 팀 식별**: 제안서의 **우측 상단(보통 제안일 바로 아래)**에 기재된 **제안자 이름**과 **팀/부서 이름**(예: "전략기획팀", "인사task", "홍길동")을 각각 찾아 'proposer_name'과 'team_name' 필드에 넣어주세요. 팀 이름은 "~~팀" 뿐만 아니라 "~~task", "~~부" 등 다양한 부서 명칭을 포함할 수 있습니다. 찾을 수 없다면 비워두세요.
+    6. **응답 형식**: 반드시 다음 JSON 형식으로만 응답해 주세요.
   `;
 
   const parts: any[] = [{ text: prompt }];
@@ -247,9 +249,11 @@ export async function evaluateProposal(
           missing_criteria: { type: Type.ARRAY, items: { type: Type.STRING } },
           table_summary: { type: Type.STRING },
           proposer_name: { type: Type.STRING, description: "제안자 이름 (예: 홍길동)" },
-          team_name: { type: Type.STRING, description: "팀 이름 (예: 전략기획팀)" }
+          team_name: { type: Type.STRING, description: "팀 이름 (예: 전략기획팀)" },
+          similarity_score: { type: Type.NUMBER, description: "가장 유사한 기존 사례와의 유사도 (0-100)" },
+          similar_case_id: { type: Type.STRING, description: "가장 유사한 기존 사례의 ID" }
         },
-        required: ["file_name", "ai_decision", "reasoning", "missing_criteria", "table_summary", "proposer_name", "team_name"]
+        required: ["file_name", "ai_decision", "reasoning", "missing_criteria", "table_summary", "proposer_name", "team_name", "similarity_score", "similar_case_id"]
       }
     }
   });

@@ -20,6 +20,8 @@ export interface EvaluationResult {
   timestamp: number;
   fileData?: string; // Base64 or URL
   mimeType?: string;
+  similarityScore?: number;
+  similarCaseId?: string;
 }
 
 export interface ReferenceExample {
@@ -30,12 +32,14 @@ export interface ReferenceExample {
   proposerName?: string;
   content: string;
   reasoning: string;
+  timestamp?: number;
 }
 
 export interface AIConfig {
   baseUrl: string;
   apiKey: string;
   modelId: string;
+  similarityThreshold: number;
 }
 
 export interface EvaluationResponse {
@@ -46,4 +50,6 @@ export interface EvaluationResponse {
   table_summary: string;
   proposer_name?: string;
   team_name?: string;
+  similarity_score?: number;
+  similar_case_id?: string;
 }

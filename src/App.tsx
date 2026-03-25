@@ -11,14 +11,17 @@ import {
   ChevronLeft, 
   Settings, 
   FileText,
+  FileDown,
   Loader2,
   Info,
   BookOpen,
   LayoutDashboard,
   Save,
+  Send,
   UploadCloud,
   Pencil,
-  X
+  X,
+  AlertTriangle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -53,15 +56,19 @@ export default function App() {
   });
 
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [evaluationProgress, setEvaluationProgress] = useState(0);
   const [isIngesting, setIsIngesting] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCriteriaModalOpen, setIsCriteriaModalOpen] = useState(false);
+  const [isComparing, setIsComparing] = useState(false);
+  const [comparisonCaseId, setComparisonCaseId] = useState<string | null>(null);
   const [aiConfig, setAiConfig] = useState<AIConfig>(() => {
     const saved = localStorage.getItem('reviewer-ai-config');
     return saved ? JSON.parse(saved) : {
       baseUrl: '',
       apiKey: '',
-      modelId: 'gemini-3-flash-preview'
+      modelId: 'gemini-3-flash-preview',
+      similarityThreshold: 80
     };
   });
   const [selectedEval, setSelectedEval] = useState<EvaluationResult | null>(null);
@@ -70,6 +77,12 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
   const [librarySearchResults, setLibrarySearchResults] = useState<ReferenceExample[]>([]);
+  
+  // Library Filter States
+  const [filterType, setFilterType] = useState<'ALL' | 'PASS' | 'FAIL'>('ALL');
+  const [filterTeam, setFilterTeam] = useState<string>('ALL');
+  const [filterPeriod, setFilterPeriod] = useState<'ALL' | 'TODAY' | 'WEEK' | 'MONTH'>('ALL');
+  const [filterReason, setFilterReason] = useState<string>('ALL');
 
   // Custom Confirm Modal State
   const [confirmModal, setConfirmModal] = useState<{
@@ -127,7 +140,7 @@ export default function App() {
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const libraryInputRef = useRef<HTMLInputElement>(null);
+  const libraryFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localStorage.setItem('reviewer-criteria', JSON.stringify(criteria));
@@ -146,7 +159,11 @@ export default function App() {
   }, [aiConfig]);
 
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 3;
+  const itemsPerPage = 4;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterType, filterTeam, filterPeriod, filterReason, librarySearchQuery]);
 
   const [editingExampleId, setEditingExampleId] = useState<string | null>(null);
   const [editingReasoning, setEditingReasoning] = useState<string>('');
@@ -177,6 +194,10 @@ export default function App() {
 
   const handleRemoveCriterion = (id: string) => {
     setCriteria(prev => prev.filter(c => c.id !== id));
+  };
+
+  const handleUpdateCriterion = (id: string, updates: Partial<Criterion>) => {
+    setCriteria(prev => prev.map(c => c.id === id ? { ...c, ...updates } : c));
   };
 
   const [selectedExampleIds, setSelectedExampleIds] = useState<string[]>([]);
@@ -214,6 +235,7 @@ export default function App() {
         title,
         content,
         reasoning: newExample.reasoning,
+        timestamp: Date.now(),
       };
       setExamples(prev => [example, ...prev]);
       setNewExample({ type: 'PASS', title: '', content: '', reasoning: '' });
@@ -270,6 +292,7 @@ export default function App() {
           title: response.title,
           content: response.content,
           reasoning: response.reasoning,
+          timestamp: Date.now(),
         };
         newExamples.push(example);
       } catch (error) {
@@ -299,13 +322,19 @@ export default function App() {
       proposerName: evalResult.proposerName,
       content: evalResult.tableSummary.substring(0, 300) + '...',
       reasoning: evalResult.userReasoning || '',
+      timestamp: evalResult.timestamp || Date.now(),
     };
     setExamples(prev => [example, ...prev]);
     
+    // Find next item to select
+    const currentIndex = evaluations.findIndex(ev => ev.id === evalResult.id);
+    const nextEval = evaluations[currentIndex + 1] || evaluations[currentIndex - 1] || null;
+
     // Remove from history after saving
     setEvaluations(prev => prev.filter(ev => ev.id !== evalResult.id));
+    
     if (selectedEval?.id === evalResult.id) {
-      setSelectedEval(null);
+      setSelectedEval(nextEval);
     }
 
     setCurrentPage(1);
@@ -321,9 +350,13 @@ export default function App() {
     if (!files || files.length === 0) return;
     
     setIsEvaluating(true);
+    setEvaluationProgress(0);
     const newEvaluations: EvaluationResult[] = [];
+    const fileArray = Array.from(files);
+    const totalFiles = fileArray.length;
 
-    for (const file of Array.from(files)) {
+    for (let i = 0; i < totalFiles; i++) {
+      const file = fileArray[i];
       try {
         const response = await evaluateProposal(
           file,
@@ -343,19 +376,50 @@ export default function App() {
           teamName: response.team_name,
           timestamp: Date.now(),
           mimeType: file.type,
+          similarityScore: response.similarity_score,
+          similarCaseId: response.similar_case_id,
         };
         newEvaluations.push(result);
       } catch (error) {
         console.error(`Error evaluating ${file.name}:`, error);
         toast.error(`${file.name} 평가 중 오류가 발생했습니다.`);
+      } finally {
+        setEvaluationProgress(Math.round(((i + 1) / totalFiles) * 100));
       }
     }
 
     setEvaluations(prev => [...newEvaluations, ...prev]);
     setIsEvaluating(false);
+    setEvaluationProgress(0);
     if (newEvaluations.length > 0) {
       setSelectedEval(newEvaluations[0]);
     }
+  };
+
+  const handleBulkSaveToLibrary = () => {
+    if (evaluations.length === 0) return;
+
+    const newExamples: ReferenceExample[] = evaluations.map(ev => ({
+      id: crypto.randomUUID(),
+      type: ev.aiDecision as 'PASS' | 'FAIL',
+      title: ev.fileName,
+      teamName: ev.teamName,
+      proposerName: ev.proposerName,
+      content: ev.tableSummary.substring(0, 300) + '...',
+      reasoning: ev.userReasoning || '',
+      timestamp: ev.timestamp || Date.now(),
+    }));
+
+    setExamples(prev => {
+      // Filter out duplicates by title if necessary, or just append
+      const existingTitles = new Set(prev.map(ex => ex.title));
+      const uniqueNewExamples = newExamples.filter(ex => !existingTitles.has(ex.title));
+      return [...uniqueNewExamples, ...prev];
+    });
+
+    setEvaluations([]);
+    setSelectedEval(null);
+    toast.success(`${newExamples.length}개의 평가 결과가 라이브러리에 저장되었습니다.`);
   };
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -396,11 +460,15 @@ export default function App() {
       return [example, ...prev];
     });
 
+    // Find next item to select
+    const currentIndex = evaluations.findIndex(ev => ev.id === id);
+    const nextEval = evaluations[currentIndex + 1] || evaluations[currentIndex - 1] || null;
+
     // Remove from history
     setEvaluations(prev => prev.filter(ev => ev.id !== id));
 
     if (selectedEval?.id === id) {
-      setSelectedEval(null);
+      setSelectedEval(nextEval);
     }
     
     toast.success(`${targetEval.fileName}가 라이브러리에 저장되고 목록에서 제거되었습니다.`);
@@ -435,7 +503,8 @@ export default function App() {
       '팀/부서': ex.teamName || '미인식',
       '제안자': ex.proposerName || '미인식',
       '내용 요약': ex.content,
-      '판정 근거': ex.reasoning
+      '판정 근거': ex.reasoning,
+      '평가 일시': ex.timestamp ? new Date(ex.timestamp).toLocaleString() : ''
     }));
 
     const worksheet = XLSX.utils.json_to_sheet(data);
@@ -443,6 +512,47 @@ export default function App() {
     XLSX.utils.book_append_sheet(workbook, worksheet, "Stored Cases");
     
     XLSX.writeFile(workbook, `stored_cases_${new Date().toISOString().split('T')[0]}.xlsx`);
+  };
+
+  const handleImportLibraryExcel = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const bstr = evt.target?.result;
+        const wb = XLSX.read(bstr, { type: 'binary' });
+        const wsname = wb.SheetNames[0];
+        const ws = wb.Sheets[wsname];
+        const data = XLSX.utils.sheet_to_json(ws) as any[];
+
+        const newExamples: ReferenceExample[] = data.map(row => ({
+          id: crypto.randomUUID(),
+          type: (row['유형'] === 'PASS' || row['유형'] === 'FAIL') ? row['유형'] : 'PASS',
+          title: row['제목'] || 'Untitled',
+          teamName: row['팀/부서'] || '',
+          proposerName: row['제안자'] || '',
+          content: row['내용 요약'] || '',
+          reasoning: row['판정 근거'] || '',
+          timestamp: row['평가 일시'] ? new Date(row['평가 일시']).getTime() : Date.now(),
+        }));
+
+        setExamples(prev => {
+          const existingTitles = new Set(prev.map(ex => ex.title));
+          const uniqueNewExamples = newExamples.filter(ex => !existingTitles.has(ex.title));
+          return [...uniqueNewExamples, ...prev];
+        });
+
+        toast.success(`${newExamples.length}개의 사례가 라이브러리에 추가되었습니다.`);
+      } catch (error) {
+        console.error('Error importing Excel:', error);
+        toast.error('엑셀 파일을 읽는 중 오류가 발생했습니다.');
+      }
+      // Reset input
+      if (libraryFileInputRef.current) libraryFileInputRef.current.value = '';
+    };
+    reader.readAsBinaryString(file);
   };
 
   // Library Analysis Calculations
@@ -471,21 +581,61 @@ export default function App() {
       .slice(0, 5);
   }, [examples]);
 
-  // Library Search Logic
-  useEffect(() => {
-    if (!librarySearchQuery.trim()) {
-      setLibrarySearchResults([]);
-      return;
+  // Library Search & Filter Logic
+  const filteredExamples = useMemo(() => {
+    let results = [...examples];
+
+    // Apply Search Query
+    if (librarySearchQuery.trim()) {
+      const query = librarySearchQuery.toLowerCase();
+      results = results.filter(e => 
+        e.title.toLowerCase().includes(query) || 
+        (e.teamName && e.teamName.toLowerCase().includes(query)) ||
+        (e.proposerName && e.proposerName.toLowerCase().includes(query))
+      );
     }
 
-    const query = librarySearchQuery.toLowerCase();
-    const results = examples.filter(e => 
-      e.title.toLowerCase().includes(query) || 
-      (e.teamName && e.teamName.toLowerCase().includes(query)) ||
-      (e.proposerName && e.proposerName.toLowerCase().includes(query))
-    );
-    setLibrarySearchResults(results);
-  }, [librarySearchQuery, examples]);
+    // Apply PASS/FAIL Filter
+    if (filterType !== 'ALL') {
+      results = results.filter(e => e.type === filterType);
+    }
+
+    // Apply Team Filter
+    if (filterTeam !== 'ALL') {
+      results = results.filter(e => e.teamName === filterTeam);
+    }
+
+    // Apply Period Filter
+    if (filterPeriod !== 'ALL') {
+      const now = Date.now();
+      const day = 24 * 60 * 60 * 1000;
+      results = results.filter(e => {
+        if (!e.timestamp) return false;
+        const diff = now - e.timestamp;
+        if (filterPeriod === 'TODAY') return diff < day;
+        if (filterPeriod === 'WEEK') return diff < 7 * day;
+        if (filterPeriod === 'MONTH') return diff < 30 * day;
+        return true;
+      });
+    }
+
+    // Apply Reason Filter
+    if (filterReason !== 'ALL') {
+      results = results.filter(e => e.reasoning.includes(filterReason));
+    }
+
+    return results;
+  }, [examples, librarySearchQuery, filterType, filterTeam, filterPeriod, filterReason]);
+
+  useEffect(() => {
+    setLibrarySearchResults(filteredExamples);
+  }, [filteredExamples]);
+
+  // Extract unique teams for filter
+  const uniqueTeams = useMemo(() => {
+    const teams = new Set(examples.map(ex => ex.teamName).filter(Boolean));
+    return Array.from(teams).sort();
+  }, [examples]);
 
   const handleSearchResultClick = (id: string) => {
     const element = document.getElementById(`example-${id}`);
@@ -632,11 +782,27 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   {evaluations.length > 0 && (
                     <button 
+                      onClick={() => {
+                        showConfirm(
+                          'AI 전체 저장',
+                          '모든 평가 결과를 AI 판정대로 라이브러리에 저장하시겠습니까?',
+                          handleBulkSaveToLibrary
+                        );
+                      }}
+                      className="p-1 px-2 hover:bg-[#141414] hover:text-white border border-[#141414] text-[#141414] rounded-sm transition-all flex items-center gap-1.5"
+                      title="Bulk Save to Library (AI Decision)"
+                    >
+                      <Send className="w-3 h-3" />
+                      <span className="text-[9px] font-bold uppercase tracking-widest">Bulk Save</span>
+                    </button>
+                  )}
+                  {evaluations.length > 0 && (
+                    <button 
                       onClick={handleDownloadExcel}
                       className="p-1 hover:bg-[#141414]/10 text-[#141414] rounded-sm transition-colors"
                       title="Download Excel"
                     >
-                      <Save className="w-3.5 h-3.5" />
+                      <FileDown className="w-3.5 h-3.5" />
                     </button>
                   )}
                   {evaluations.length > 0 && (
@@ -716,8 +882,8 @@ export default function App() {
                         </div>
                         <h4 className="text-xs font-medium truncate mb-0.5">{ev.fileName}</h4>
                         {(ev.teamName || ev.proposerName) && (
-                          <p className="text-[9px] font-bold uppercase tracking-widest opacity-60 mb-1 flex items-center gap-1">
-                            <BookOpen className="w-2.5 h-2.5" /> 
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-[#141414] mb-1 flex items-center gap-1">
+                            <BookOpen className="w-2.5 h-2.5 opacity-40" /> 
                             {ev.teamName && <span>[{ev.teamName}] </span>}
                             {ev.proposerName}
                           </p>
@@ -748,9 +914,20 @@ export default function App() {
                 <div className="flex items-center gap-3">
                   <h3 className="font-serif italic text-sm">Upload Proposals</h3>
                   {isEvaluating && (
-                    <div className="flex items-center gap-2 px-2 py-0.5 bg-[#141414] text-[#E4E3E0] text-[9px] font-bold uppercase tracking-widest rounded-full">
-                      <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                      <span>Analyzing...</span>
+                    <div className="flex flex-col gap-1 min-w-[200px]">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-[#141414] text-[9px] font-bold uppercase tracking-widest">
+                          <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                          <span>Analyzing {evaluationProgress}%</span>
+                        </div>
+                      </div>
+                      <div className="h-1 w-full bg-[#141414]/10 rounded-full overflow-hidden">
+                        <motion.div 
+                          initial={{ width: 0 }}
+                          animate={{ width: `${evaluationProgress}%` }}
+                          className="h-full bg-[#141414]"
+                        />
+                      </div>
                     </div>
                   )}
                 </div>
@@ -794,71 +971,82 @@ export default function App() {
                     >
                       {/* Result Header */}
                       <div className="flex items-start justify-between border-b border-[#141414] pb-8">
-                        <div>
+                        <div className="flex-1">
                           <h2 className="font-serif italic text-4xl mb-2">{selectedEval.fileName}</h2>
-                          {selectedEval.proposerName && (
-                            <p className="text-sm font-bold text-[#141414]/70 mb-4 uppercase tracking-widest flex items-center gap-2">
-                              <BookOpen className="w-4 h-4" /> {selectedEval.proposerName}
+                          {(selectedEval.teamName || selectedEval.proposerName) && (
+                            <p className="text-sm font-bold text-[#141414]/70 mb-6 uppercase tracking-widest flex items-center gap-2">
+                              <BookOpen className="w-4 h-4" /> 
+                              {selectedEval.teamName && <span>[{selectedEval.teamName}] </span>}
+                              {selectedEval.proposerName}
                             </p>
                           )}
-                          <div className="flex items-center gap-4">
-                            <div className="flex flex-col">
-                              <span className="text-[10px] uppercase tracking-widest opacity-40">AI Decision</span>
-                              <span className={cn(
-                                "text-xl font-bold tracking-tighter",
-                                selectedEval.aiDecision === 'PASS' ? "text-[#16a34a]" : "text-[#dc2626]"
-                              )}>
-                                {selectedEval.aiDecision}
-                              </span>
+                          
+                          <div className="flex items-center gap-8">
+                            {/* User Decision Buttons moved to the left */}
+                            <div className="flex gap-1">
+                              <button 
+                                onClick={() => handleOverride(selectedEval.id, 'PASS')}
+                                className={cn(
+                                  "px-4 py-2 text-[10px] uppercase tracking-widest border border-[#141414] transition-all",
+                                  selectedEval.userDecision === 'PASS' ? "bg-[#141414] text-[#E4E3E0]" : "hover:bg-[#141414]/5"
+                                )}
+                              >
+                                Pass
+                              </button>
+                              <button 
+                                onClick={() => handleOverride(selectedEval.id, 'FAIL')}
+                                className={cn(
+                                  "px-4 py-2 text-[10px] uppercase tracking-widest border border-[#141414] transition-all",
+                                  selectedEval.userDecision === 'FAIL' ? "bg-[#141414] text-[#E4E3E0]" : "hover:bg-[#141414]/5"
+                                )}
+                              >
+                                Fail
+                              </button>
                             </div>
-                            {selectedEval.userDecision && (
-                              <div className="flex flex-col border-l border-[#141414]/10 pl-4">
-                                <span className="text-[10px] uppercase tracking-widest opacity-40">User Override</span>
+
+                            <div className="flex items-center gap-4 border-l border-[#141414]/10 pl-8">
+                              <div className="flex flex-col">
+                                <span className="text-[10px] uppercase tracking-widest font-bold">AI Decision</span>
                                 <span className={cn(
                                   "text-xl font-bold tracking-tighter",
-                                  selectedEval.userDecision === 'PASS' ? "text-[#16a34a]" : "text-[#dc2626]"
+                                  selectedEval.aiDecision === 'PASS' ? "text-[#16a34a]" : "text-[#dc2626]"
                                 )}>
-                                  {selectedEval.userDecision}
+                                  {selectedEval.aiDecision}
                                 </span>
                               </div>
-                            )}
-                          </div>
-                        </div>
-                        
-                        <div className="flex flex-col gap-2">
-                          <span className="text-[10px] uppercase tracking-widest opacity-40 text-right">Human Control</span>
-                          <div className="flex gap-1">
-                            <button 
-                              onClick={() => handleOverride(selectedEval.id, 'PASS')}
-                              className={cn(
-                                "px-4 py-2 text-[10px] uppercase tracking-widest border border-[#141414] transition-all",
-                                selectedEval.userDecision === 'PASS' ? "bg-[#141414] text-[#E4E3E0]" : "hover:bg-[#141414]/5"
+                              {selectedEval.userDecision && (
+                                <div className="flex flex-col border-l border-[#141414]/10 pl-4">
+                                  <span className="text-[10px] uppercase tracking-widest font-bold">User Override</span>
+                                  <span className={cn(
+                                    "text-xl font-bold tracking-tighter",
+                                    selectedEval.userDecision === 'PASS' ? "text-[#16a34a]" : "text-[#dc2626]"
+                                  )}>
+                                    {selectedEval.userDecision}
+                                  </span>
+                                </div>
                               )}
-                            >
-                              Pass
-                            </button>
-                            <button 
-                              onClick={() => handleOverride(selectedEval.id, 'FAIL')}
-                              className={cn(
-                                "px-4 py-2 text-[10px] uppercase tracking-widest border border-[#141414] transition-all",
-                                selectedEval.userDecision === 'FAIL' ? "bg-[#141414] text-[#E4E3E0]" : "hover:bg-[#141414]/5"
-                              )}
-                            >
-                              Fail
-                            </button>
-                            <button 
-                              onClick={() => handleSaveToLibrary(selectedEval)}
-                              className="ml-2 px-4 py-2 text-[10px] uppercase tracking-widest border border-[#141414] bg-blue-600 text-white hover:bg-blue-700 flex items-center gap-2"
-                            >
-                              <Save className="w-3 h-3" /> Save to Library
-                            </button>
+                            </div>
                           </div>
                         </div>
                       </div>
 
                       {/* Reasoning Section */}
                       <section className="space-y-4">
-                        <h3 className="font-serif italic text-xl border-b border-[#141414]/10 pb-2">Analysis Reasoning</h3>
+                        <div className="flex items-center justify-between border-b border-[#141414]/10 pb-2">
+                          <h3 className="font-serif italic text-xl">Analysis Reasoning</h3>
+                          {selectedEval.similarityScore && selectedEval.similarityScore >= 80 && selectedEval.similarCaseId && (
+                            <button 
+                              onClick={() => {
+                                setComparisonCaseId(selectedEval.similarCaseId || null);
+                                setIsComparing(true);
+                              }}
+                              className="flex items-center gap-2 px-3 py-1 bg-[#dc2626] text-white text-[9px] font-bold uppercase tracking-widest rounded-full hover:bg-[#b91c1c] transition-all animate-pulse"
+                            >
+                              <AlertTriangle className="w-3 h-3" />
+                              중복 의심: 유사도 {selectedEval.similarityScore}% (대조하기)
+                            </button>
+                          )}
+                        </div>
                         <div className="prose prose-sm max-w-none text-[#141414] leading-relaxed">
                           <Markdown>{selectedEval.reasoning}</Markdown>
                         </div>
@@ -1013,6 +1201,91 @@ export default function App() {
                         )}
                       </div>
                     )}
+
+                    {/* Filters Section */}
+                    <div className="space-y-4 pt-4 border-t border-[#141414]/10">
+                      <h4 className="text-[10px] uppercase tracking-widest font-bold opacity-50">Filters</h4>
+                      
+                      {/* PASS/FAIL Filter */}
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] uppercase tracking-widest opacity-40">Decision Type</label>
+                        <div className="flex gap-1">
+                          {['ALL', 'PASS', 'FAIL'].map((type) => (
+                            <button
+                              key={type}
+                              onClick={() => setFilterType(type as any)}
+                              className={cn(
+                                "flex-1 py-1.5 text-[9px] uppercase tracking-widest border transition-all",
+                                filterType === type 
+                                  ? "bg-[#141414] text-white border-[#141414]" 
+                                  : "bg-white text-[#141414] border-[#141414]/10 hover:border-[#141414]/30"
+                              )}
+                            >
+                              {type}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Team Filter */}
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] uppercase tracking-widest opacity-40">Team/Department</label>
+                        <select
+                          value={filterTeam}
+                          onChange={(e) => setFilterTeam(e.target.value)}
+                          className="w-full p-2 text-[10px] border border-[#141414]/10 bg-white focus:outline-none focus:border-[#141414]"
+                        >
+                          <option value="ALL">All Teams</option>
+                          {uniqueTeams.map(team => (
+                            <option key={team} value={team}>{team}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Period Filter */}
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] uppercase tracking-widest opacity-40">Time Period</label>
+                        <select
+                          value={filterPeriod}
+                          onChange={(e) => setFilterPeriod(e.target.value as any)}
+                          className="w-full p-2 text-[10px] border border-[#141414]/10 bg-white focus:outline-none focus:border-[#141414]"
+                        >
+                          <option value="ALL">All Time</option>
+                          <option value="TODAY">Today</option>
+                          <option value="WEEK">Last 7 Days</option>
+                          <option value="MONTH">Last 30 Days</option>
+                        </select>
+                      </div>
+
+                      {/* Failure Reason Filter */}
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] uppercase tracking-widest opacity-40">Failure Reason</label>
+                        <select
+                          value={filterReason}
+                          onChange={(e) => setFilterReason(e.target.value)}
+                          className="w-full p-2 text-[10px] border border-[#141414]/10 bg-white focus:outline-none focus:border-[#141414]"
+                        >
+                          <option value="ALL">All Reasons</option>
+                          {failureReasons.map(reason => (
+                            <option key={reason.text} value={reason.text}>{reason.text}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Reset Filters */}
+                      <button
+                        onClick={() => {
+                          setFilterType('ALL');
+                          setFilterTeam('ALL');
+                          setFilterPeriod('ALL');
+                          setFilterReason('ALL');
+                          setLibrarySearchQuery('');
+                        }}
+                        className="w-full py-2 text-[9px] uppercase tracking-widest text-red-600 hover:bg-red-50 transition-all border border-transparent hover:border-red-100"
+                      >
+                        Reset All Filters
+                      </button>
+                    </div>
                   </div>
                 </section>
               </div>
@@ -1024,11 +1297,25 @@ export default function App() {
                 <h3 className="font-serif italic text-2xl">Stored Cases</h3>
                 <div className="flex items-center gap-3">
                   <span className="text-[10px] uppercase tracking-widest font-bold bg-[#141414] text-white px-2 py-1">
-                    Total {examples.length}
+                    Total {filteredExamples.length}
                   </span>
+                  <input 
+                    type="file" 
+                    ref={libraryFileInputRef}
+                    onChange={handleImportLibraryExcel}
+                    accept=".xlsx, .xls"
+                    className="hidden"
+                  />
+                  <button 
+                    onClick={() => libraryFileInputRef.current?.click()}
+                    className="flex items-center gap-2 px-3 py-1.5 border border-[#141414] text-[10px] uppercase tracking-widest hover:bg-[#141414] hover:text-white transition-all"
+                    title="Import Excel"
+                  >
+                    <FileUp className="w-3 h-3" /> Import Excel
+                  </button>
                   <button 
                     onClick={handleDownloadLibraryExcel}
-                    disabled={examples.length === 0}
+                    disabled={filteredExamples.length === 0}
                     className="flex items-center gap-2 px-3 py-1.5 border border-[#141414] text-[10px] uppercase tracking-widest hover:bg-[#141414] hover:text-white transition-all disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[#141414]"
                   >
                     <FileText className="w-3 h-3" /> Export Excel
@@ -1046,7 +1333,7 @@ export default function App() {
 
               <div className="flex-1 overflow-y-auto p-10">
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 content-start">
-                  {examples.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((ex) => (
+                  {filteredExamples.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((ex) => (
                     <div 
                       key={ex.id} 
                       id={`example-${ex.id}`}
@@ -1139,17 +1426,17 @@ export default function App() {
                       </div>
                     </div>
                   ))}
-                  {examples.length === 0 && (
+                  {filteredExamples.length === 0 && (
                     <div className="col-span-full py-20 text-center border border-dashed border-[#141414]/20 opacity-30">
                       <BookOpen className="w-16 h-16 mx-auto mb-4" />
-                      <p className="text-xs uppercase tracking-widest">Library is empty. Add cases to improve AI accuracy.</p>
+                      <p className="text-xs uppercase tracking-widest">No cases match your filters.</p>
                     </div>
                   )}
                 </div>
               </div>
 
               {/* Pagination Controls - Fixed at bottom to align with chat input */}
-              {examples.length > itemsPerPage && (
+              {filteredExamples.length > itemsPerPage && (
                 <div className="p-4 bg-[#F5F5F3] flex items-center justify-center gap-2">
                   <button 
                     onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
@@ -1160,7 +1447,7 @@ export default function App() {
                   </button>
                   
                   <div className="flex items-center gap-1">
-                    {Array.from({ length: Math.ceil(examples.length / itemsPerPage) }, (_, i) => i + 1).map((page) => (
+                    {Array.from({ length: Math.ceil(filteredExamples.length / itemsPerPage) }, (_, i) => i + 1).map((page) => (
                       <button
                         key={page}
                         onClick={() => setCurrentPage(page)}
@@ -1177,8 +1464,8 @@ export default function App() {
                   </div>
 
                   <button 
-                    onClick={() => setCurrentPage(prev => Math.min(Math.ceil(examples.length / itemsPerPage), prev + 1))}
-                    disabled={currentPage === Math.ceil(examples.length / itemsPerPage)}
+                    onClick={() => setCurrentPage(prev => Math.min(Math.ceil(filteredExamples.length / itemsPerPage), prev + 1))}
+                    disabled={currentPage === Math.ceil(filteredExamples.length / itemsPerPage)}
                     className="p-1.5 hover:bg-[#141414]/5 disabled:opacity-20 transition-all"
                   >
                     <ChevronRight className="w-4 h-4" />
@@ -1246,6 +1533,22 @@ export default function App() {
                     className="w-full p-3 text-xs bg-white border border-[#141414] focus:outline-none"
                   />
                   <p className="text-[9px] opacity-40 italic">OpenAI 호환 API를 사용할 때만 입력하세요.</p>
+                </div>
+                <div className="space-y-2 pt-2 border-t border-[#141414]/10">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] uppercase tracking-widest opacity-60 block">Similarity Threshold (중복 판정 기준)</label>
+                    <span className="text-xs font-bold">{aiConfig.similarityThreshold}%</span>
+                  </div>
+                  <input 
+                    type="range"
+                    min="0"
+                    max="100"
+                    step="1"
+                    value={aiConfig.similarityThreshold}
+                    onChange={(e) => setAiConfig(prev => ({ ...prev, similarityThreshold: parseInt(e.target.value) }))}
+                    className="w-full h-1 bg-[#141414]/10 rounded-lg appearance-none cursor-pointer accent-[#141414]"
+                  />
+                  <p className="text-[9px] opacity-40 italic">유사도가 이 수치 이상일 경우 중복 과제로 판정하여 FAIL 처리합니다.</p>
                 </div>
                 <div className="pt-4 flex items-center gap-2 text-[10px] text-blue-600 bg-blue-50 p-3 border border-blue-200">
                   <Info className="w-4 h-4 flex-shrink-0" />
@@ -1319,24 +1622,43 @@ export default function App() {
                 </div>
                 <div className="space-y-4">
                   <h3 className="text-[10px] uppercase tracking-widest opacity-60 font-bold">Current Criteria</h3>
-                  <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-[#141414]/20">
+                  <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-[#141414]/20">
                     {criteria.map((c) => (
-                      <div key={c.id} className="group relative p-3 border border-[#141414]/10 bg-white/50 rounded-sm">
-                        <div className="flex items-start gap-2">
-                          <div className={cn(
-                            "mt-1 w-2 h-2 rounded-full flex-shrink-0",
-                            c.isMandatory ? "bg-red-500" : "bg-blue-500"
-                          )} />
-                          <p className="text-xs leading-relaxed pr-6">{c.text}</p>
+                      <div key={c.id} className="group relative p-4 border border-[#141414] bg-white space-y-3">
+                        <div className="flex items-center justify-between">
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={c.isMandatory}
+                              onChange={(e) => handleUpdateCriterion(c.id, { isMandatory: e.target.checked })}
+                              className="w-3 h-3 accent-[#141414]"
+                            />
+                            <span className={cn(
+                              "text-[9px] uppercase tracking-widest font-bold",
+                              c.isMandatory ? "text-red-600" : "text-blue-600"
+                            )}>
+                              {c.isMandatory ? 'Mandatory' : 'Optional'}
+                            </span>
+                          </label>
+                          <button 
+                            onClick={() => handleRemoveCriterion(c.id)}
+                            className="p-1 hover:bg-red-50 rounded-full transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                          </button>
                         </div>
-                        <button 
-                          onClick={() => handleRemoveCriterion(c.id)}
-                          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <Trash2 className="w-3 h-3 text-red-500" />
-                        </button>
+                        <textarea
+                          value={c.text}
+                          onChange={(e) => handleUpdateCriterion(c.id, { text: e.target.value })}
+                          className="w-full p-2 text-xs bg-[#F5F5F3] border border-transparent focus:border-[#141414] focus:outline-none min-h-[60px] resize-none transition-all"
+                        />
                       </div>
                     ))}
+                    {criteria.length === 0 && (
+                      <div className="py-12 text-center border border-dashed border-[#141414]/20 opacity-30">
+                        <p className="text-[10px] uppercase tracking-widest">No criteria defined.</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1391,6 +1713,112 @@ export default function App() {
                   Confirm
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Comparison Modal */}
+      <AnimatePresence>
+        {isComparing && comparisonCaseId && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 md:p-8">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsComparing(false)}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-7xl h-full max-h-[90vh] bg-[#E4E3E0] border border-[#141414] shadow-2xl flex flex-col overflow-hidden"
+            >
+              <header className="p-6 border-b border-[#141414] bg-[#D6D5D2] flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <h3 className="font-serif italic text-2xl">Side-by-Side Comparison</h3>
+                  <div className="px-3 py-1 bg-red-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-full">
+                    유사도 {selectedEval?.similarityScore}%
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsComparing(false)}
+                  className="p-2 hover:bg-[#141414]/5 rounded-full transition-all"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </header>
+
+              <div className="flex-1 overflow-hidden flex divide-x divide-[#141414]">
+                {/* Current Proposal */}
+                <div className="flex-1 flex flex-col overflow-hidden">
+                  <div className="p-4 bg-[#141414] text-white text-[10px] uppercase tracking-widest font-bold">
+                    Current Proposal: {selectedEval?.fileName}
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-white">
+                    <section className="space-y-3">
+                      <h4 className="font-serif italic text-lg border-b border-[#141414]/10 pb-1">Analysis Reasoning</h4>
+                      <div className="text-xs leading-relaxed prose prose-sm max-w-none">
+                        <Markdown>{selectedEval?.reasoning}</Markdown>
+                      </div>
+                    </section>
+                    <section className="space-y-3">
+                      <h4 className="font-serif italic text-lg border-b border-[#141414]/10 pb-1">Extracted Content</h4>
+                      <div className="p-4 bg-[#F5F5F3] border border-[#141414]/5 rounded-sm font-mono text-[10px] leading-relaxed whitespace-pre-wrap">
+                        {selectedEval?.tableSummary}
+                      </div>
+                    </section>
+                  </div>
+                </div>
+
+                {/* Similar Case */}
+                <div className="flex-1 flex flex-col overflow-hidden">
+                  <div className="p-4 bg-blue-900 text-white text-[10px] uppercase tracking-widest font-bold flex justify-between items-center">
+                    <span>Reference Case: {examples.find(ex => ex.id === comparisonCaseId)?.title}</span>
+                    <span className={cn(
+                      "px-2 py-0.5 rounded-sm text-[8px]",
+                      examples.find(ex => ex.id === comparisonCaseId)?.type === 'PASS' ? "bg-green-500" : "bg-red-500"
+                    )}>
+                      {examples.find(ex => ex.id === comparisonCaseId)?.type}
+                    </span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-[#F5F5F3]">
+                    {examples.find(ex => ex.id === comparisonCaseId) ? (
+                      <>
+                        <section className="space-y-3">
+                          <h4 className="font-serif italic text-lg border-b border-[#141414]/10 pb-1">Original Reasoning</h4>
+                          <div className="text-xs leading-relaxed prose prose-sm max-w-none">
+                            <Markdown>{examples.find(ex => ex.id === comparisonCaseId)?.reasoning}</Markdown>
+                          </div>
+                        </section>
+                        <section className="space-y-3">
+                          <h4 className="font-serif italic text-lg border-b border-[#141414]/10 pb-1">Case Content</h4>
+                          <div className="p-4 bg-white border border-[#141414]/5 rounded-sm font-mono text-[10px] leading-relaxed whitespace-pre-wrap">
+                            {examples.find(ex => ex.id === comparisonCaseId)?.content}
+                          </div>
+                        </section>
+                      </>
+                    ) : (
+                      <div className="h-full flex items-center justify-center italic opacity-40">
+                        Case not found or has been deleted.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <footer className="p-6 border-t border-[#141414] bg-[#D6D5D2] flex justify-between items-center">
+                <p className="text-[10px] opacity-60 italic">
+                  * 유사도가 80% 이상인 경우 중복 과제일 가능성이 높으므로 면밀한 검토가 필요합니다.
+                </p>
+                <button 
+                  onClick={() => setIsComparing(false)}
+                  className="px-8 py-2 bg-[#141414] text-white text-[10px] uppercase tracking-widest hover:bg-[#141414]/90 transition-all"
+                >
+                  Close Comparison
+                </button>
+              </footer>
             </motion.div>
           </div>
         )}
