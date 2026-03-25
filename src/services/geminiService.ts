@@ -52,7 +52,7 @@ async function extractOfficeText(file: File): Promise<ExtractedData> {
   let images: { data: string; mimeType: string }[] = [];
 
   if (file.name.endsWith(".pptx")) {
-    // PPTX: Read all slides
+    // PPTX: Read only the first slide for performance
     const slideFiles = Object.keys(zip.files).filter(name => name.startsWith("ppt/slides/slide") && name.endsWith(".xml"));
     slideFiles.sort((a, b) => {
       const numA = parseInt(a.match(/\d+/)![0]);
@@ -60,16 +60,16 @@ async function extractOfficeText(file: File): Promise<ExtractedData> {
       return numA - numB;
     });
 
-    let slideIndex = 1;
-    for (const slidePath of slideFiles) {
-      const content = await zip.file(slidePath)?.async("string");
+    // Only take the first slide
+    const firstSlide = slideFiles[0];
+    if (firstSlide) {
+      const content = await zip.file(firstSlide)?.async("string");
       if (content) {
-        fullText += `\n[슬라이드 ${slideIndex}]\n`;
+        fullText += `\n[슬라이드 1]\n`;
         const matches = content.match(/<a:t>([^<]*)<\/a:t>/g);
         if (matches) {
           fullText += matches.map(m => m.replace(/<a:t>|<\/a:t>/g, "")).join(" ") + "\n";
         }
-        slideIndex++;
       }
     }
 
@@ -235,9 +235,9 @@ export async function evaluateProposal(
         { 
           role: "user", 
           content: [
-            { type: "text", text: prompt },
+            { type: "text" as const, text: prompt },
             ...images.map(img => ({
-              type: "image_url",
+              type: "image_url" as const,
               image_url: { url: `data:${img.mimeType};base64,${img.data}` }
             }))
           ]
@@ -327,9 +327,9 @@ export async function ingestReferenceFile(
         { 
           role: "user", 
           content: [
-            { type: "text", text: prompt },
+            { type: "text" as const, text: prompt },
             ...images.map(img => ({
-              type: "image_url",
+              type: "image_url" as const,
               image_url: { url: `data:${img.mimeType};base64,${img.data}` }
             }))
           ]

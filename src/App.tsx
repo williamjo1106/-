@@ -77,6 +77,7 @@ export default function App() {
   const [dragActive, setDragActive] = useState(false);
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
   const [librarySearchResults, setLibrarySearchResults] = useState<ReferenceExample[]>([]);
+  const [failedUploads, setFailedUploads] = useState<string[]>([]);
   
   // Library Filter States
   const [filterType, setFilterType] = useState<'ALL' | 'PASS' | 'FAIL'>('ALL');
@@ -351,6 +352,7 @@ export default function App() {
     
     setIsEvaluating(true);
     setEvaluationProgress(0);
+    setFailedUploads([]); // Clear previous failures
     const newEvaluations: EvaluationResult[] = [];
     const fileArray = Array.from(files);
     const totalFiles = fileArray.length;
@@ -382,6 +384,7 @@ export default function App() {
         newEvaluations.push(result);
       } catch (error) {
         console.error(`Error evaluating ${file.name}:`, error);
+        setFailedUploads(prev => [...prev, file.name]);
         toast.error(`${file.name} 평가 중 오류가 발생했습니다.`);
       } finally {
         setEvaluationProgress(Math.round(((i + 1) / totalFiles) * 100));
@@ -932,6 +935,25 @@ export default function App() {
                   )}
                 </div>
                 <div className="flex items-center gap-4">
+                  {failedUploads.length > 0 && (
+                    <div className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-200 rounded-sm animate-pulse">
+                      <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
+                      <div className="flex flex-col">
+                        <span className="text-[9px] font-bold text-red-600 uppercase tracking-widest">Upload Failed ({failedUploads.length})</span>
+                        <div className="flex gap-1 overflow-hidden max-w-[200px]">
+                          {failedUploads.map((name, idx) => (
+                            <span key={idx} className="text-[8px] text-red-500 truncate" title={name}>{name}{idx < failedUploads.length - 1 ? ',' : ''}</span>
+                          ))}
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => setFailedUploads([])}
+                        className="ml-1 p-0.5 hover:bg-red-100 rounded-full"
+                      >
+                        <X className="w-2.5 h-2.5 text-red-600" />
+                      </button>
+                    </div>
+                  )}
                   {!isEvaluating && (
                     <>
                       <p className="text-[10px] opacity-60 uppercase tracking-widest hidden lg:block">
