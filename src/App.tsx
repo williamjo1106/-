@@ -21,7 +21,8 @@ import {
   UploadCloud,
   Pencil,
   X,
-  AlertTriangle
+  AlertTriangle,
+  Play
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -57,6 +58,9 @@ export default function App() {
 
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [evaluationProgress, setEvaluationProgress] = useState(0);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [totalFilesCount, setTotalFilesCount] = useState(0);
+  const [completedCount, setCompletedCount] = useState(0);
   const cancelRef = useRef(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -352,20 +356,30 @@ export default function App() {
   const handleFileUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
     
-    setIsEvaluating(true);
-    setEvaluationProgress(0);
-    cancelRef.current = false;
-    setFailedUploads([]); // Clear previous failures
-    const newEvaluations: EvaluationResult[] = [];
     const fileArray = Array.from(files);
-    const totalFiles = fileArray.length;
+    setPendingFiles(fileArray);
+    setTotalFilesCount(fileArray.length);
+    setCompletedCount(0);
+    setFailedUploads([]); // Clear previous failures
+    
+    await startProcessing(fileArray, fileArray.length, 0);
+  };
 
-    for (let i = 0; i < totalFiles; i++) {
+  const startProcessing = async (filesToProcess: File[], total: number, startOffset: number) => {
+    setIsEvaluating(true);
+    cancelRef.current = false;
+    
+    let currentCompleted = startOffset;
+
+    for (let i = 0; i < filesToProcess.length; i++) {
       if (cancelRef.current) {
+        setPendingFiles(filesToProcess.slice(i));
+        setCompletedCount(currentCompleted);
         toast.info('업로드가 중단되었습니다.');
         break;
       }
-      const file = fileArray[i];
+      
+      const file = filesToProcess[i];
       try {
         const response = await evaluateProposal(
           file,
@@ -388,22 +402,33 @@ export default function App() {
           similarityScore: response.similarity_score,
           similarCaseId: response.similar_case_id,
         };
-        newEvaluations.push(result);
+        
+        setEvaluations(prev => [result, ...prev]);
+        setSelectedEval(result);
       } catch (error) {
         console.error(`Error evaluating ${file.name}:`, error);
         setFailedUploads(prev => [...prev, file.name]);
         toast.error(`${file.name} 평가 중 오류가 발생했습니다.`);
       } finally {
-        setEvaluationProgress(Math.round(((i + 1) / totalFiles) * 100));
+        currentCompleted++;
+        setCompletedCount(currentCompleted);
+        setEvaluationProgress(Math.round((currentCompleted / total) * 100));
       }
     }
 
-    setEvaluations(prev => [...newEvaluations, ...prev]);
-    setIsEvaluating(false);
-    setEvaluationProgress(0);
-    if (newEvaluations.length > 0) {
-      setSelectedEval(newEvaluations[0]);
+    if (!cancelRef.current) {
+      setPendingFiles([]);
+      setTotalFilesCount(0);
+      setCompletedCount(0);
+      setEvaluationProgress(0);
     }
+    
+    setIsEvaluating(false);
+  };
+
+  const handleResumeUpload = () => {
+    if (pendingFiles.length === 0) return;
+    startProcessing(pendingFiles, totalFilesCount, completedCount);
   };
 
   const handleBulkSaveToLibrary = () => {
@@ -942,6 +967,41 @@ export default function App() {
                           initial={{ width: 0 }}
                           animate={{ width: `${evaluationProgress}%` }}
                           className="h-full bg-[#141414]"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {!isEvaluating && pendingFiles.length > 0 && (
+                    <div className="flex flex-col gap-1 min-w-[200px]">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 text-[#141414] text-[9px] font-bold uppercase tracking-widest opacity-60">
+                          <span>Paused at {evaluationProgress}%</span>
+                        </div>
+                        <div className="flex gap-1">
+                          <button 
+                            onClick={handleResumeUpload}
+                            className="px-1.5 py-0.5 border border-[#141414] text-[8px] font-bold uppercase tracking-widest hover:bg-green-600 hover:text-white transition-all flex items-center gap-1"
+                          >
+                            <Play className="w-2 h-2 fill-current" />
+                            Resume
+                          </button>
+                          <button 
+                            onClick={() => {
+                              setPendingFiles([]);
+                              setEvaluationProgress(0);
+                              setTotalFilesCount(0);
+                              setCompletedCount(0);
+                            }}
+                            className="px-1.5 py-0.5 border border-[#141414] text-[8px] font-bold uppercase tracking-widest hover:bg-gray-200 transition-all"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                      <div className="h-1 w-full bg-[#141414]/10 rounded-full overflow-hidden">
+                        <div 
+                          style={{ width: `${evaluationProgress}%` }}
+                          className="h-full bg-[#141414] opacity-30"
                         />
                       </div>
                     </div>
