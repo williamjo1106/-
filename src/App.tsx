@@ -57,6 +57,7 @@ export default function App() {
 
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [evaluationProgress, setEvaluationProgress] = useState(0);
+  const cancelRef = useRef(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCriteriaModalOpen, setIsCriteriaModalOpen] = useState(false);
@@ -78,6 +79,7 @@ export default function App() {
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
   const [librarySearchResults, setLibrarySearchResults] = useState<ReferenceExample[]>([]);
   const [failedUploads, setFailedUploads] = useState<string[]>([]);
+  const [isFailedUploadsModalOpen, setIsFailedUploadsModalOpen] = useState(false);
   
   // Library Filter States
   const [filterType, setFilterType] = useState<'ALL' | 'PASS' | 'FAIL'>('ALL');
@@ -352,12 +354,17 @@ export default function App() {
     
     setIsEvaluating(true);
     setEvaluationProgress(0);
+    cancelRef.current = false;
     setFailedUploads([]); // Clear previous failures
     const newEvaluations: EvaluationResult[] = [];
     const fileArray = Array.from(files);
     const totalFiles = fileArray.length;
 
     for (let i = 0; i < totalFiles; i++) {
+      if (cancelRef.current) {
+        toast.info('업로드가 중단되었습니다.');
+        break;
+      }
       const file = fileArray[i];
       try {
         const response = await evaluateProposal(
@@ -773,7 +780,7 @@ export default function App() {
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".pdf,.pptx,.docx,.txt"
+              accept=".pdf,.pptx,.ppt,.docx,.doc,.txt"
               onChange={(e) => handleFileUpload(e.target.files)}
               className="hidden"
             />
@@ -923,6 +930,12 @@ export default function App() {
                           <Loader2 className="w-2.5 h-2.5 animate-spin" />
                           <span>Analyzing {evaluationProgress}%</span>
                         </div>
+                        <button 
+                          onClick={() => { cancelRef.current = true; }}
+                          className="px-1.5 py-0.5 border border-[#141414] text-[8px] font-bold uppercase tracking-widest hover:bg-red-600 hover:text-white transition-all"
+                        >
+                          Stop
+                        </button>
                       </div>
                       <div className="h-1 w-full bg-[#141414]/10 rounded-full overflow-hidden">
                         <motion.div 
@@ -936,19 +949,18 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-4">
                   {failedUploads.length > 0 && (
-                    <div className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-200 rounded-sm animate-pulse">
+                    <div 
+                      onClick={() => setIsFailedUploadsModalOpen(true)}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-red-50 border border-red-200 rounded-sm animate-pulse cursor-pointer hover:bg-red-100 transition-colors"
+                    >
                       <AlertTriangle className="w-3.5 h-3.5 text-red-600" />
                       <div className="flex flex-col">
                         <span className="text-[9px] font-bold text-red-600 uppercase tracking-widest">Upload Failed ({failedUploads.length})</span>
-                        <div className="flex gap-1 overflow-hidden max-w-[200px]">
-                          {failedUploads.map((name, idx) => (
-                            <span key={idx} className="text-[8px] text-red-500 truncate" title={name}>{name}{idx < failedUploads.length - 1 ? ',' : ''}</span>
-                          ))}
-                        </div>
+                        <span className="text-[8px] text-red-500 opacity-70">Click to view details</span>
                       </div>
                       <button 
-                        onClick={() => setFailedUploads([])}
-                        className="ml-1 p-0.5 hover:bg-red-100 rounded-full"
+                        onClick={(e) => { e.stopPropagation(); setFailedUploads([]); }}
+                        className="ml-1 p-0.5 hover:bg-red-200 rounded-full"
                       >
                         <X className="w-2.5 h-2.5 text-red-600" />
                       </button>
@@ -978,7 +990,7 @@ export default function App() {
                   <div className="absolute inset-0 z-50 bg-[#141414]/90 flex flex-col items-center justify-center text-[#E4E3E0] pointer-events-none">
                     <UploadCloud className="w-16 h-16 mb-4 animate-bounce" />
                     <h3 className="font-serif italic text-3xl mb-2">Drop to Upload</h3>
-                    <p className="text-xs uppercase tracking-widest opacity-60">PDF, PPTX, DOCX & TXT (Max 80 files)</p>
+                    <p className="text-xs uppercase tracking-widest opacity-60">PDF, PPT, PPTX, DOC, DOCX & TXT (Max 80 files)</p>
                   </div>
                 )}
                 
@@ -1498,6 +1510,75 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Failed Uploads Modal */}
+      <AnimatePresence>
+        {isFailedUploadsModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsFailedUploadsModalOpen(false)}
+              className="absolute inset-0 bg-[#141414]/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-[#F5F5F3] border border-[#141414] shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-[#141414] bg-[#D6D5D2] flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <AlertTriangle className="w-5 h-5 text-red-600" />
+                  <h3 className="font-serif italic text-xl">Failed Uploads</h3>
+                </div>
+                <button 
+                  onClick={() => setIsFailedUploadsModalOpen(false)}
+                  className="p-1 hover:bg-[#141414]/10 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              
+              <div className="p-6 max-h-[60vh] overflow-y-auto">
+                <p className="text-xs text-[#141414]/60 uppercase tracking-widest mb-4">
+                  The following {failedUploads.length} files could not be processed:
+                </p>
+                <div className="space-y-2">
+                  {failedUploads.map((fileName, index) => (
+                    <div 
+                      key={index} 
+                      className="p-3 bg-white border border-red-100 flex items-start gap-3 group"
+                    >
+                      <div className="mt-0.5 w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" />
+                      <span className="text-sm font-medium break-all">{fileName}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="p-6 bg-[#D6D5D2]/30 border-t border-[#141414]/10 flex justify-end gap-3">
+                <button 
+                  onClick={() => {
+                    setFailedUploads([]);
+                    setIsFailedUploadsModalOpen(false);
+                  }}
+                  className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest border border-red-600 text-red-600 hover:bg-red-600 hover:text-white transition-all"
+                >
+                  Clear All
+                </button>
+                <button 
+                  onClick={() => setIsFailedUploadsModalOpen(false)}
+                  className="px-6 py-2 bg-[#141414] text-white text-[10px] font-bold uppercase tracking-widest hover:bg-[#141414]/90 transition-all"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Settings Modal */}
       <AnimatePresence>

@@ -38,8 +38,12 @@ async function startServer() {
       } else if (
         mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || 
         mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        mimeType === 'application/vnd.ms-powerpoint' ||
+        mimeType === 'application/msword' ||
         fileName.toLowerCase().endsWith('.pptx') ||
-        fileName.toLowerCase().endsWith('.docx')
+        fileName.toLowerCase().endsWith('.docx') ||
+        fileName.toLowerCase().endsWith('.ppt') ||
+        fileName.toLowerCase().endsWith('.doc')
       ) {
         return new Promise((resolve, reject) => {
           officeParser.parseOffice(buffer, (data, err) => {
