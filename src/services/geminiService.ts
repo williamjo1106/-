@@ -51,7 +51,8 @@ async function extractOfficeText(file: File): Promise<ExtractedData> {
   let fullText = "";
   let images: { data: string; mimeType: string }[] = [];
 
-  if (file.name.endsWith(".pptx")) {
+  const fileName = file.name.toLowerCase();
+  if (fileName.endsWith(".pptx")) {
     // PPTX: Read only the first slide for performance
     const slideFiles = Object.keys(zip.files).filter(name => name.startsWith("ppt/slides/slide") && name.endsWith(".xml"));
     slideFiles.sort((a, b) => {
@@ -86,7 +87,7 @@ async function extractOfficeText(file: File): Promise<ExtractedData> {
         }
       }
     }
-  } else if (file.name.endsWith(".docx")) {
+  } else if (fileName.endsWith(".docx")) {
     const content = await zip.file("word/document.xml")?.async("string");
     if (content) {
       const matches = content.match(/<w:t>([^<]*)<\/w:t>/g);
@@ -139,15 +140,16 @@ async function extractPdfText(file: File): Promise<ExtractedData> {
 // Main extraction entry point
 export async function extractText(file: File): Promise<ExtractedData> {
   try {
+    const fileName = file.name.toLowerCase();
     console.log(`Attempting client-side extraction for: ${file.name}`);
     
-    if (file.name.endsWith(".pptx") || file.name.endsWith(".docx")) {
+    if (fileName.endsWith(".pptx") || fileName.endsWith(".docx")) {
       const data = await extractOfficeText(file);
       if (data.text || data.images.length > 0) return data;
-    } else if (file.name.endsWith(".pdf") || file.type === "application/pdf") {
+    } else if (fileName.endsWith(".pdf") || file.type === "application/pdf") {
       const data = await extractPdfText(file);
       if (data.text) return data;
-    } else if (file.type === "text/plain") {
+    } else if (file.type === "text/plain" || fileName.endsWith(".txt")) {
       return { text: await file.text(), images: [] };
     }
     

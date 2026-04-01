@@ -408,7 +408,8 @@ export default function App() {
       } catch (error) {
         console.error(`Error evaluating ${file.name}:`, error);
         setFailedUploads(prev => [...prev, file.name]);
-        toast.error(`${file.name} 평가 중 오류가 발생했습니다.`);
+        const errorMessage = error instanceof Error ? error.message : '알 수 없는 오류가 발생했습니다.';
+        toast.error(`${file.name} 평가 중 오류가 발생했습니다: ${errorMessage}`);
       } finally {
         currentCompleted++;
         setCompletedCount(currentCompleted);

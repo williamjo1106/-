@@ -3,6 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 
@@ -39,21 +41,53 @@ async function startServer() {
         mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || 
         mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
         mimeType === 'application/vnd.ms-powerpoint' ||
+        mimeType === 'application/mspowerpoint' ||
+        mimeType === 'application/powerpoint' ||
+        mimeType === 'application/x-mspowerpoint' ||
+        mimeType === 'application/vnd.ms-office' ||
         mimeType === 'application/msword' ||
+        mimeType === 'application/x-msword' ||
+        mimeType === 'application/vnd.ms-excel' ||
+        mimeType === 'application/msexcel' ||
+        mimeType === 'application/x-msexcel' ||
         fileName.toLowerCase().endsWith('.pptx') ||
         fileName.toLowerCase().endsWith('.docx') ||
         fileName.toLowerCase().endsWith('.ppt') ||
-        fileName.toLowerCase().endsWith('.doc')
+        fileName.toLowerCase().endsWith('.doc') ||
+        fileName.toLowerCase().endsWith('.xls')
       ) {
-        return new Promise((resolve, reject) => {
-          officeParser.parseOffice(buffer, (data, err) => {
-            if (err) {
-              console.error('OfficeParser Error:', err);
-              reject(err);
-            }
-            else resolve(data);
+        console.log(`Using officeparser for: ${fileName} (MIME: ${mimeType})`);
+        
+        // For legacy formats like .ppt and .doc, officeparser often works better with file paths
+        // because it might use external tools like catdoc/antiword under the hood.
+        const tempPath = path.join(os.tmpdir(), `office_${Date.now()}_${fileName}`);
+        try {
+          fs.writeFileSync(tempPath, buffer);
+          return new Promise((resolve, reject) => {
+            officeParser.parseOffice(tempPath, (data, err) => {
+              // Cleanup temp file
+              fs.unlink(tempPath, (unlinkErr) => {
+                if (unlinkErr) console.warn(`Failed to delete temp file ${tempPath}:`, unlinkErr);
+              });
+
+              if (err) {
+                console.error(`OfficeParser error for ${fileName}:`, err);
+                reject(err);
+              }
+              else {
+                console.log(`OfficeParser successfully extracted ${data?.length || 0} chars from ${fileName}`);
+                resolve(data || '');
+              }
+            }, {
+              outputErrorLog: true,
+              setEncoding: "utf-8"
+            });
           });
-        });
+        } catch (err) {
+          console.error(`Failed to handle temp file for ${fileName}:`, err);
+          if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+          return '';
+        }
       } else if (mimeType === 'text/plain' || fileName.toLowerCase().endsWith('.txt')) {
         return buffer.toString('utf-8');
       }
@@ -76,6 +110,10 @@ async function startServer() {
       const text = await extractText(fileData, fileName, mimeType);
       if (!text || !text.trim()) {
         console.warn(`No text extracted from: ${fileName}`);
+        // For legacy formats, sometimes extraction fails but we can still try to analyze the file name or provide a generic message
+        if (fileName.toLowerCase().endsWith('.ppt') || fileName.toLowerCase().endsWith('.doc')) {
+          return res.status(400).json({ error: `파일(${fileName})에서 텍스트를 추출할 수 없습니다. .pptx 또는 .docx 형식으로 변환하여 업로드하시거나, 내용을 직접 복사해서 붙여넣어 주세요.` });
+        }
         return res.status(400).json({ error: '텍스트를 추출할 수 없는 파일입니다.' });
       }
 
